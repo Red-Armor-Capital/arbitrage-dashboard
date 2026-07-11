@@ -7,6 +7,14 @@ import {
   type OpportunitySortKey,
   type SortDirection,
 } from "./opportunity-sort";
+import {
+  DEX_VENUES,
+  matchesDexSelection,
+  parseDexPreference,
+  requiredDexVenues,
+  serializeDexPreference,
+  type DexVenue,
+} from "./opportunity-filter";
 
 type VenueStatus = {
   venue: string;
@@ -72,6 +80,7 @@ const sortLabels: Record<OpportunitySortKey, string> = {
 
 const API_BASE =
   process.env.NEXT_PUBLIC_CARRY_API_URL ?? "http://localhost:8000";
+const DEX_PREFERENCE_STORAGE_KEY = "equity-carry:selected-dex:v1";
 
 const venueNames: Record<string, string> = {
   binance: "Binance",
@@ -188,6 +197,10 @@ export default function Home() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [strategyFilter, setStrategyFilter] =
     useState<StrategyFilter>("all");
+  const [selectedDexes, setSelectedDexes] = useState<Set<DexVenue>>(
+    () => new Set(DEX_VENUES),
+  );
+  const [dexPreferenceReady, setDexPreferenceReady] = useState(false);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -218,6 +231,36 @@ export default function Home() {
     };
   }, [loadDashboard]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const stored = parseDexPreference(
+          window.localStorage.getItem(DEX_PREFERENCE_STORAGE_KEY),
+        );
+        if (stored !== null) setSelectedDexes(stored);
+      } catch {
+        // Keep the default selection when browser storage is unavailable.
+      } finally {
+        setDexPreferenceReady(true);
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!dexPreferenceReady) return;
+
+    try {
+      window.localStorage.setItem(
+        DEX_PREFERENCE_STORAGE_KEY,
+        serializeDexPreference(selectedDexes),
+      );
+    } catch {
+      // The filter remains usable when browser storage is unavailable.
+    }
+  }, [dexPreferenceReady, selectedDexes]);
+
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -245,6 +288,27 @@ export default function Home() {
     }
   };
 
+  const toggleDex = (venue: DexVenue) => {
+    setSelectedDexes((current) => {
+      const next = new Set(current);
+      if (next.has(venue)) next.delete(venue);
+      else next.add(venue);
+      return next;
+    });
+  };
+
+  const dexOpportunityCounts = useMemo(() => {
+    const counts = Object.fromEntries(
+      DEX_VENUES.map((venue) => [venue, 0]),
+    ) as Record<DexVenue, number>;
+
+    for (const item of data?.opportunities ?? []) {
+      for (const venue of requiredDexVenues(item)) counts[venue] += 1;
+    }
+
+    return counts;
+  }, [data]);
+
   const rows = useMemo(() => {
     if (!data) return [];
     const threshold = Number(minApr) || 0;
@@ -260,6 +324,7 @@ export default function Home() {
       const rankingApr = item.mean_carry_apr ?? item.current_carry_apr;
       return (
         matchesQuery &&
+        matchesDexSelection(item, selectedDexes) &&
         (strategyFilter === "all" || item.strategy_type === strategyFilter) &&
         rankingApr >= threshold &&
         (!stableOnly || stable)
@@ -271,6 +336,7 @@ export default function Home() {
     data,
     minApr,
     query,
+    selectedDexes,
     sortDirection,
     sortKey,
     stableOnly,
@@ -374,7 +440,7 @@ export default function Home() {
                   <input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="NVDA / Binance"
+                    placeholder="NVDA / Lighter"
                   />
                 </label>
                 <label className="compactField">
@@ -445,6 +511,55 @@ export default function Home() {
                 </label>
               </div>
             </div>
+
+            <fieldset className="dexFilterBar">
+              <legend className="srOnly">我的可用 DEX</legend>
+              <div className="dexFilterIntro">
+                <strong>我的可用 DEX</strong>
+                <small>仅保留所有链上永续腿都可交易的组合</small>
+              </div>
+              <div className="dexOptionList">
+                {DEX_VENUES.map((venue) => {
+                  const checked = selectedDexes.has(venue);
+                  return (
+                    <label
+                      className={`dexOption ${checked ? "isSelected" : ""}`}
+                      key={venue}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleDex(venue)}
+                      />
+                      <span>{venueLabel(venue)}</span>
+                      <small>{dexOpportunityCounts[venue]} 个组合</small>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="dexFilterActions">
+                <span aria-live="polite">
+                  已选 {selectedDexes.size}/{DEX_VENUES.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDexes(new Set(DEX_VENUES))}
+                  disabled={selectedDexes.size === DEX_VENUES.length}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDexes(new Set<DexVenue>())}
+                  disabled={selectedDexes.size === 0}
+                >
+                  清空
+                </button>
+              </div>
+              <p className="dexFilterNote">
+                Moomoo / IBKR 合成现货腿不受此筛选影响
+              </p>
+            </fieldset>
 
             <div className="assumptionBanner">
               <strong>合成现货口径</strong>
@@ -653,14 +768,18 @@ export default function Home() {
             {rows.length === 0 && !error && (
               <div className="emptyState">
                 <strong>
-                  {(data?.opportunities.length ?? 0) > 0
-                    ? "没有符合当前筛选的组合"
-                    : "正在积累实时资金费数据"}
+                  {selectedDexes.size === 0
+                    ? "尚未选择可用 DEX"
+                    : (data?.opportunities.length ?? 0) > 0
+                      ? "没有符合当前筛选的组合"
+                      : "正在积累实时资金费数据"}
                 </strong>
                 <span>
-                  {(data?.opportunities.length ?? 0) > 0
-                    ? "请调整组合类型、最低年化、稳定性或搜索条件。"
-                    : "正资金费链上永续可生成合成现货组合；双永续组合需要同一标的出现在两个健康数据源。"}
+                  {selectedDexes.size === 0
+                    ? "请至少勾选一个你可以交易的链上平台。"
+                    : (data?.opportunities.length ?? 0) > 0
+                      ? "请调整组合类型、最低年化、稳定性或搜索条件。"
+                      : "正资金费链上永续可生成合成现货组合；双永续组合需要同一标的出现在两个健康数据源。"}
                 </span>
               </div>
             )}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -37,6 +37,12 @@ class MarketSnapshot(BaseModel):
     funding_rate: float | None = None
     funding_interval_hours: float = 8.0
     next_funding_at: datetime | None = None
+    source_observed_at: datetime | None = None
+    target_source: Literal["api", "schedule"] = "schedule"
+    raw_funding_rate: float | None = None
+    raw_rate_unit: Literal["decimal", "percent"] = "decimal"
+    source_tenor_hours: float | None = None
+    transform_version: str = "v1"
     open_interest: float | None = None
     volume_24h: float | None = None
 
@@ -89,6 +95,37 @@ class VenueStatus(BaseModel):
     last_error: str | None = None
     instruments: int = 0
     latency_ms: float | None = None
+
+
+class PredictionCollectorVenueStatus(BaseModel):
+    venue: str
+    status: Literal["warming_up", "healthy", "degraded", "offline"]
+    last_success_at: datetime | None = None
+    last_flushed_minute: datetime | None = None
+    expected_symbols: int = 0
+    sampled_symbols_last_minute: int = 0
+    coverage_60m: float = 0.0
+    missed_minutes_60m: int = 0
+    hot_rows: int = 0
+    archived_rows: int = 0
+    last_error: str | None = None
+    updated_at: datetime
+
+
+class PredictionCollectorStatusResponse(BaseModel):
+    generated_at: datetime = Field(default_factory=utc_now)
+    enabled: bool
+    poll_seconds: int
+    sample_resolution_seconds: int = 60
+    status_window_minutes: int
+    hot_retention_days: int
+    archive_dir: str
+    last_archive_checked_at: datetime | None = None
+    last_archive_error: str | None = None
+    hot_rows: int
+    archived_rows: int
+    latest_archived_month: date | None = None
+    venues: list[PredictionCollectorVenueStatus]
 
 
 class CarryOpportunity(BaseModel):

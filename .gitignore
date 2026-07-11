@@ -53,3 +53,5 @@ __pycache__/
 /data/*.duckdb
 /data/*.duckdb.wal
 /data/*.parquet
+/data/prediction_archive/
+/data/logs/

@@ -51,6 +51,11 @@ async def venues():
     return store.get_statuses()
 
 
+@app.get("/api/prediction-collector/status")
+async def prediction_collector_status():
+    return service.prediction_collector_status()
+
+
 @app.post("/api/refresh")
 async def refresh():
     await service.refresh_once()
