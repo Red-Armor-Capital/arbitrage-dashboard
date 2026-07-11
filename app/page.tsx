@@ -1,0 +1,704 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import {
+  sortOpportunities,
+  type OpportunitySortKey,
+  type SortDirection,
+} from "./opportunity-sort";
+
+type VenueStatus = {
+  venue: string;
+  status: "healthy" | "degraded" | "offline" | "not_configured";
+  last_success_at: string | null;
+  last_error: string | null;
+  instruments: number;
+  latency_ms: number | null;
+};
+
+type Opportunity = {
+  underlying: string;
+  display_name: string | null;
+  asset_class: "stock" | "etf" | "index" | "preipo" | "basket" | "unknown";
+  strategy_type: "perp_perp" | "spot_perp";
+  price_assumption: "observed" | "spot_equals_perp";
+  fee_scope: "both_legs" | "perp_leg_only";
+  long_venue: string;
+  long_symbol: string;
+  short_venue: string;
+  short_symbol: string;
+  current_carry_apr: number;
+  current_rate_kind: "indicative";
+  mean_carry_apr: number | null;
+  carry_apr_volatility: number | null;
+  positive_ratio: number | null;
+  round_trip_fee_pct: number;
+  breakeven_hours: number | null;
+  indicative_breakeven_hours: number | null;
+  sample_hours: number;
+  history_quality: "sufficient" | "limited" | "unavailable";
+  long_funding_apr: number;
+  short_funding_apr: number;
+  cross_basis_pct: number | null;
+  data_freshness_seconds: number | null;
+  updated_at: string;
+};
+
+type Dashboard = {
+  generated_at: string;
+  lookback_days: number;
+  summary: {
+    opportunities: number;
+    best_carry_apr: number | null;
+    median_breakeven_hours: number | null;
+    stable_opportunities: number;
+    venues_healthy: number;
+    venues_total: number;
+  };
+  opportunities: Opportunity[];
+  venues: VenueStatus[];
+};
+
+type StrategyFilter = "all" | "spot_perp" | "perp_perp";
+
+const sortLabels: Record<OpportunitySortKey, string> = {
+  mean: "7D 已结算均值",
+  current: "当前预测年化",
+  volatility: "年化波动率",
+  positiveRatio: "正 Carry 占比",
+  breakeven: "手续费回本",
+};
+
+const API_BASE =
+  process.env.NEXT_PUBLIC_CARRY_API_URL ?? "http://localhost:8000";
+
+const venueNames: Record<string, string> = {
+  binance: "Binance",
+  bitget: "Bitget",
+  bybit: "Bybit",
+  gate: "Gate",
+  kraken: "Kraken",
+  okx: "OKX",
+  lighter: "Lighter",
+  extended: "Extended",
+  xyz: "trade[XYZ]",
+  hotstuff: "Hotstuff",
+  orderly: "Orderly",
+  synthetic_spot: "合成现货（假设）",
+};
+
+function venueLabel(value: string) {
+  return venueNames[value] ?? value;
+}
+
+function formatApr(value: number | null, digits = 1) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(digits)}%`;
+}
+
+function formatHours(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "不可回本";
+  if (value === 0) return "无需覆盖费用";
+  if (value < 1) return `${Math.max(1, Math.round(value * 60))} 分钟`;
+  if (value < 48) return `${value.toFixed(value < 10 ? 1 : 0)} 小时`;
+  return `${(value / 24).toFixed(value < 240 ? 1 : 0)} 天`;
+}
+
+function freshnessLabel(value: number | null) {
+  if (value === null) return "未知";
+  if (value < 60) return `${Math.round(value)} 秒`;
+  return `${Math.round(value / 60)} 分钟`;
+}
+
+function isStable(item: Opportunity) {
+  return (
+    item.history_quality === "sufficient" &&
+    item.positive_ratio !== null &&
+    item.mean_carry_apr !== null &&
+    item.carry_apr_volatility !== null &&
+    item.positive_ratio >= 0.8 &&
+    item.carry_apr_volatility <= Math.max(Math.abs(item.mean_carry_apr), 1)
+  );
+}
+
+type SortableHeaderProps = {
+  label: string;
+  sortKey: OpportunitySortKey;
+  activeSortKey: OpportunitySortKey;
+  direction: SortDirection;
+  onSort: (sortKey: OpportunitySortKey) => void;
+};
+
+function SortableHeader({
+  label,
+  sortKey,
+  activeSortKey,
+  direction,
+  onSort,
+}: SortableHeaderProps) {
+  const active = sortKey === activeSortKey;
+  const ariaSort: "none" | "ascending" | "descending" = active
+    ? direction === "asc"
+      ? "ascending"
+      : "descending"
+    : "none";
+  const nextDirection = active && direction === "desc" ? "升序" : "降序";
+
+  return (
+    <th className="sortableHeader" scope="col" aria-sort={ariaSort}>
+      <button
+        className={`columnSortButton ${active ? "isActive" : ""}`}
+        type="button"
+        onClick={() => onSort(sortKey)}
+        aria-label={`${label}，${active ? (direction === "desc" ? "当前降序" : "当前升序") : "当前未排序"}，点击切换为${nextDirection}`}
+      >
+        <span>{label}</span>
+        <span className="sortIndicator" aria-hidden="true">
+          {active ? (direction === "desc" ? "↓" : "↑") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="skeletonStack" aria-label="正在载入实时数据">
+      <div className="skeletonCards">
+        {[0, 1, 2, 3].map((item) => (
+          <div className="skeletonCard" key={item} />
+        ))}
+      </div>
+      <div className="skeletonTable" />
+    </div>
+  );
+}
+
+export default function Home() {
+  const [data, setData] = useState<Dashboard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [minApr, setMinApr] = useState("0");
+  const [stableOnly, setStableOnly] = useState(false);
+  const [sortKey, setSortKey] = useState<OpportunitySortKey>("mean");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [strategyFilter, setStrategyFilter] =
+    useState<StrategyFilter>("all");
+
+  const loadDashboard = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/dashboard`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`API ${response.status}`);
+      const payload = (await response.json()) as Dashboard;
+      setData(payload);
+      setError(null);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "无法连接实时数据服务",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const initial = window.setTimeout(loadDashboard, 0);
+    const timer = window.setInterval(loadDashboard, 15_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [loadDashboard]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await fetch(`${API_BASE}/api/refresh`, { method: "POST" });
+      await loadDashboard();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const handleSort = (nextSortKey: OpportunitySortKey) => {
+    if (nextSortKey === sortKey) {
+      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
+      return;
+    }
+
+    setSortKey(nextSortKey);
+    setSortDirection("desc");
+  };
+
+  const handleSortSelection = (nextSortKey: OpportunitySortKey) => {
+    if (nextSortKey !== sortKey) {
+      setSortKey(nextSortKey);
+      setSortDirection("desc");
+    }
+  };
+
+  const rows = useMemo(() => {
+    if (!data) return [];
+    const threshold = Number(minApr) || 0;
+    const filtered = data.opportunities.filter((item) => {
+      const matchesQuery =
+        !query ||
+        item.underlying.toLowerCase().includes(query.toLowerCase()) ||
+        venueLabel(item.long_venue).toLowerCase().includes(query.toLowerCase()) ||
+        venueLabel(item.short_venue).toLowerCase().includes(query.toLowerCase()) ||
+        (item.strategy_type === "spot_perp" ? "现货 永续 合成" : "永续")
+          .includes(query.toLowerCase());
+      const stable = isStable(item);
+      const rankingApr = item.mean_carry_apr ?? item.current_carry_apr;
+      return (
+        matchesQuery &&
+        (strategyFilter === "all" || item.strategy_type === strategyFilter) &&
+        rankingApr >= threshold &&
+        (!stableOnly || stable)
+      );
+    });
+
+    return sortOpportunities(filtered, sortKey, sortDirection);
+  }, [
+    data,
+    minApr,
+    query,
+    sortDirection,
+    sortKey,
+    stableOnly,
+    strategyFilter,
+  ]);
+
+  const generatedAt = data
+    ? new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).format(new Date(data.generated_at))
+    : "—";
+
+  return (
+    <main className="appShell">
+      <header className="topbar">
+        <div className="brandBlock">
+          <div className="brandMark" aria-hidden="true">
+            EC
+          </div>
+          <div>
+            <div className="eyebrow">MARKET NEUTRAL RESEARCH</div>
+            <h1>Equity Carry Monitor</h1>
+          </div>
+        </div>
+        <div className="liveCluster">
+          <span className={`liveDot ${error ? "isError" : ""}`} />
+          <span>{error ? "数据服务异常" : "实时监控"}</span>
+          <span className="divider" />
+          <span className="muted">更新于 {generatedAt}</span>
+          <button
+            className="refreshButton"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            type="button"
+          >
+            {refreshing ? "同步中" : "立即刷新"}
+          </button>
+        </div>
+      </header>
+
+      <section className="heroRow">
+        <div>
+          <p className="sectionLabel">实时资金费 CARRY</p>
+          <h2>找到可覆盖交易成本的稳定 Carry</h2>
+          <p className="heroCopy">
+            同时比较永续—永续资金费差与合成现货—链上永续的单边资金费。
+            当前 Funding 仅作下一期指示；均值、波动率和胜率只使用已结算记录。
+          </p>
+        </div>
+        <div className="methodNote">
+          <span>当前口径</span>
+          <strong>空正 Funding 永续 · 多对冲腿</strong>
+          <small>合成现货按永续同价、Funding 为 0</small>
+        </div>
+      </section>
+
+      {loading ? (
+        <DashboardSkeleton />
+      ) : (
+        <>
+          <section className="metricGrid" aria-label="策略概览">
+            <article className="metricCard accentCard">
+              <span>最佳 7D Carry</span>
+              <strong>{formatApr(data?.summary.best_carry_apr ?? null)}</strong>
+              <small>全量研究候选 · 已结算 funding 均值</small>
+            </article>
+            <article className="metricCard">
+              <span>研究候选组合</span>
+              <strong>{data?.summary.opportunities ?? 0}</strong>
+              <small>{rows.length} 个符合当前筛选</small>
+            </article>
+            <article className="metricCard">
+              <span>中位回本时间</span>
+              <strong>
+                {formatHours(data?.summary.median_breakeven_hours ?? null)}
+              </strong>
+              <small>按各组合已计费用口径</small>
+            </article>
+            <article className="metricCard">
+              <span>稳定组合</span>
+              <strong>{data?.summary.stable_opportunities ?? 0}</strong>
+              <small>
+                数据源 {data?.summary.venues_healthy ?? 0}/
+                {data?.summary.venues_total ?? 0} 健康
+              </small>
+            </article>
+          </section>
+
+          <section className="workspacePanel">
+            <div className="panelHeader">
+              <div>
+                <p className="sectionLabel">OPPORTUNITY TABLE</p>
+                <h3>Carry 机会</h3>
+              </div>
+              <div className="filterRow">
+                <label className="searchBox">
+                  <span>搜索</span>
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="NVDA / Binance"
+                  />
+                </label>
+                <label className="compactField">
+                  <span>最低年化</span>
+                  <input
+                    type="number"
+                    value={minApr}
+                    onChange={(event) => setMinApr(event.target.value)}
+                    min="0"
+                    step="1"
+                  />
+                  <b>%</b>
+                </label>
+                <label className="compactField selectField strategyField">
+                  <span>组合</span>
+                  <select
+                    value={strategyFilter}
+                    onChange={(event) =>
+                      setStrategyFilter(event.target.value as StrategyFilter)
+                    }
+                  >
+                    <option value="all">全部</option>
+                    <option value="spot_perp">合成现货—永续</option>
+                    <option value="perp_perp">永续—永续</option>
+                  </select>
+                </label>
+                <div className="sortPicker">
+                  <label className="compactField selectField">
+                    <span>排序</span>
+                    <select
+                      value={sortKey}
+                      onChange={(event) =>
+                        handleSortSelection(
+                          event.target.value as OpportunitySortKey,
+                        )
+                      }
+                    >
+                      <option value="mean">7D 已结算均值</option>
+                      <option value="current">当前预测年化</option>
+                      <option value="volatility">年化波动率</option>
+                      <option value="positiveRatio">正 Carry 占比</option>
+                      <option value="breakeven">手续费回本</option>
+                    </select>
+                  </label>
+                  <button
+                    className="sortDirectionButton"
+                    type="button"
+                    onClick={() =>
+                      setSortDirection((current) =>
+                        current === "desc" ? "asc" : "desc",
+                      )
+                    }
+                    aria-label={`${sortLabels[sortKey]}当前${sortDirection === "desc" ? "降序" : "升序"}，点击切换为${sortDirection === "desc" ? "升序" : "降序"}`}
+                    title={`切换为${sortDirection === "desc" ? "升序" : "降序"}`}
+                  >
+                    <span aria-hidden="true">
+                      {sortDirection === "desc" ? "↓" : "↑"}
+                    </span>
+                  </button>
+                </div>
+                <label className="toggleLabel">
+                  <input
+                    type="checkbox"
+                    checked={stableOnly}
+                    onChange={(event) => setStableOnly(event.target.checked)}
+                  />
+                  <span>只看稳定</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="assumptionBanner">
+              <strong>合成现货口径</strong>
+              <span>
+                默认股票/ETF 可在 Moomoo 或 IBKR 建立现货腿，价格按对应链上永续 mark/index
+                同价、Funding 为 0；未接入真实券商行情，现货交易费、融资/机会成本、滑点、
+                税费、基差及平台额外过夜持仓费暂按 0。永续腿目前只计平台 taker 开平仓费。
+              </span>
+            </div>
+
+            {error && (
+              <div className="errorBanner" role="alert">
+                <strong>实时后端尚未连通</strong>
+                <span>
+                  {error}。前端会每 15 秒自动重试，已保存的数据仍会保留在本地。
+                </span>
+              </div>
+            )}
+
+            <div
+              className="tableScroll"
+              role="region"
+              aria-label="Carry 研究候选表"
+              tabIndex={0}
+            >
+              <table>
+                <caption className="srOnly">
+                  合成现货—链上永续与永续—永续 Carry 研究候选
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">标的</th>
+                    <th scope="col">Carry 来源</th>
+                    <SortableHeader
+                      label="当前预测年化"
+                      sortKey="current"
+                      activeSortKey={sortKey}
+                      direction={sortDirection}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="7D 已结算均值"
+                      sortKey="mean"
+                      activeSortKey={sortKey}
+                      direction={sortDirection}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="年化波动率"
+                      sortKey="volatility"
+                      activeSortKey={sortKey}
+                      direction={sortDirection}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="正 Carry 占比"
+                      sortKey="positiveRatio"
+                      activeSortKey={sortKey}
+                      direction={sortDirection}
+                      onSort={handleSort}
+                    />
+                    <th scope="col">往返手续费</th>
+                    <th scope="col">手续费回本</th>
+                    <th scope="col">数据</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((item) => {
+                    const stable = isStable(item);
+                    const hasHistory = item.mean_carry_apr !== null;
+                    const sampleSufficient =
+                      item.history_quality === "sufficient";
+                    const shownBreakeven =
+                      item.breakeven_hours ?? item.indicative_breakeven_hours;
+                    return (
+                      <tr
+                        key={`${item.strategy_type}-${item.underlying}-${item.long_venue}-${item.long_symbol}-${item.short_venue}-${item.short_symbol}`}
+                      >
+                        <td>
+                          <div className="assetCell">
+                            <span className="assetBadge">
+                              {item.underlying.slice(0, 2)}
+                            </span>
+                            <div>
+                              <strong>{item.underlying}</strong>
+                              <small>{item.display_name ?? "US Equity"}</small>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span
+                            className={`strategyBadge ${
+                              item.strategy_type === "spot_perp"
+                                ? "syntheticBadge"
+                                : ""
+                            }`}
+                          >
+                            {item.strategy_type === "spot_perp"
+                              ? "合成现货—永续 · 假设"
+                              : "永续—永续"}
+                          </span>
+                          <div className="venuePair">
+                            <span className="venueLeg longLeg">
+                              多 {venueLabel(item.long_venue)}
+                            </span>
+                            <span className="pairArrow">→</span>
+                            <span className="venueLeg shortLeg">
+                              空 {venueLabel(item.short_venue)}
+                            </span>
+                          </div>
+                          <small className="symbolLine">
+                            {item.strategy_type === "spot_perp"
+                              ? `${item.long_symbol} 同价假设 / ${item.short_symbol}`
+                              : `${item.long_symbol} / ${item.short_symbol}`}
+                          </small>
+                        </td>
+                        <td className="numberCell positiveValue">
+                          {formatApr(item.current_carry_apr)}
+                          <small>预计 · 尚未结算</small>
+                        </td>
+                        <td className="numberCell">
+                          <strong>{formatApr(item.mean_carry_apr)}</strong>
+                          <small>
+                            {hasHistory
+                              ? item.strategy_type === "spot_perp"
+                                ? `${item.sample_hours}h 永续已结算样本`
+                                : `${item.sample_hours}h 双永续重叠样本`
+                              : item.strategy_type === "spot_perp"
+                                ? "等待该永续已结算样本"
+                                : "等待双永续重叠样本"}
+                          </small>
+                        </td>
+                        <td className="numberCell">
+                          <span
+                            className={stable ? "stableValue" : "warningValue"}
+                          >
+                            {item.carry_apr_volatility === null
+                              ? "—"
+                              : `${item.carry_apr_volatility.toFixed(1)}%`}
+                          </span>
+                          <small>
+                            {!hasHistory
+                              ? "样本不足"
+                              : !sampleSufficient
+                                ? "样本积累中"
+                                : stable
+                                  ? "稳定"
+                                  : "波动偏高"}
+                          </small>
+                        </td>
+                        <td className="numberCell">
+                          {item.positive_ratio === null
+                            ? "—"
+                            : `${(item.positive_ratio * 100).toFixed(0)}%`}
+                          <div className="ratioTrack">
+                            <span
+                              style={{
+                                width: `${Math.min(100, (item.positive_ratio ?? 0) * 100)}%`,
+                              }}
+                            />
+                          </div>
+                        </td>
+                        <td className="numberCell">
+                          {item.round_trip_fee_pct.toFixed(3)}%
+                          <small>
+                            {item.fee_scope === "perp_leg_only"
+                              ? "永续 taker × 2 · 现货成本未计"
+                              : "双方 taker × 4"}
+                          </small>
+                        </td>
+                        <td className="numberCell breakEvenCell">
+                          {formatHours(shownBreakeven)}
+                          <small>
+                            {item.breakeven_hours !== null
+                              ? "按已结算均值"
+                              : "按当前预测"}
+                          </small>
+                        </td>
+                        <td>
+                          <span
+                            className={`freshnessPill ${
+                              (item.data_freshness_seconds ?? 999) > 90
+                                ? "stale"
+                                : ""
+                            }`}
+                          >
+                            {freshnessLabel(item.data_freshness_seconds)}
+                          </span>
+                          <small className="sampleLine">
+                            {sampleSufficient
+                              ? item.strategy_type === "spot_perp"
+                                ? `${item.sample_hours}h 单永续已结算`
+                                : `${item.sample_hours}h 双永续重叠`
+                              : item.sample_hours > 0
+                                ? `${item.sample_hours}h · 样本不足`
+                                : "仅当前预测"}
+                          </small>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {rows.length === 0 && !error && (
+              <div className="emptyState">
+                <strong>
+                  {(data?.opportunities.length ?? 0) > 0
+                    ? "没有符合当前筛选的组合"
+                    : "正在积累实时资金费数据"}
+                </strong>
+                <span>
+                  {(data?.opportunities.length ?? 0) > 0
+                    ? "请调整组合类型、最低年化、稳定性或搜索条件。"
+                    : "正资金费链上永续可生成合成现货组合；双永续组合需要同一标的出现在两个健康数据源。"}
+                </span>
+              </div>
+            )}
+          </section>
+
+          <section className="statusPanel">
+            <div>
+              <p className="sectionLabel">DATA SOURCES</p>
+              <h3>平台连接状态</h3>
+            </div>
+            <div className="statusGrid">
+              {(data?.venues ?? []).map((venue) => (
+                <article className="statusItem" key={venue.venue}>
+                  <span className={`statusDot ${venue.status}`} />
+                  <div>
+                    <strong>{venueLabel(venue.venue)}</strong>
+                    <small>
+                      {venue.status === "healthy"
+                        ? `${venue.instruments} 个标的 · ${Math.round(venue.latency_ms ?? 0)}ms`
+                        : venue.last_error ?? "等待连接"}
+                    </small>
+                  </div>
+                </article>
+              ))}
+              {(data?.venues.length ?? 0) === 0 && (
+                <span className="muted">后端启动后将在这里显示平台状态。</span>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+
+      <footer>
+        <span>Equity Carry Monitor · Research only</span>
+        <span>
+          当前 Funding 会在结算前变化；合成现货不是实时券商报价，且未计现货成本、滑点、税费、稳定币和保证金风险。
+        </span>
+      </footer>
+    </main>
+  );
+}
