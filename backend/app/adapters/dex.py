@@ -764,8 +764,9 @@ class HotstuffAdapter(VenueAdapter):
                         "instrument_id": item.get("id"),
                         "funding_model": "discrete_snapshot",
                         "history_source": "public_account_funding_history",
-                        "current_rate_tenor_hours": 8,
+                        "current_rate_tenor_hours": 1,
                         "settlement_interval_hours": 1,
+                        "ticker_rate_semantics": "hourly_payment_rate",
                         "price_index": price_index,
                         "growth_mode": item.get("growth_mode") or item.get("growthMode"),
                         "delisted": False,
@@ -788,14 +789,12 @@ class HotstuffAdapter(VenueAdapter):
                 if "funding_rate" in item
                 else item.get("fundingRate")
             )
-            raw_eight_hour_rate = self.as_float(raw_rate_value)
-            # Hotstuff publishes an 8-hour display rate but transfers funding
-            # hourly. Normalize it to the actual next hourly payment rate.
-            rate = (
-                raw_eight_hour_rate / 8
-                if raw_eight_hour_rate is not None
-                else None
-            )
+            raw_hourly_rate = self.as_float(raw_rate_value)
+            # Hotstuff's product UI discusses an 8-hour display rate, but the
+            # public ticker field already matches the hourly rate used by exact
+            # funding-payment records. Treating it as an 8-hour value would
+            # divide the actual payment rate twice.
+            rate = raw_hourly_rate
             next_funding = _strict_next_utc_hour(collection_observed)
             snapshots.append(
                 MarketSnapshot(
@@ -812,10 +811,10 @@ class HotstuffAdapter(VenueAdapter):
                     next_funding_at=next_funding,
                     source_observed_at=_source_datetime(item.get("timestamp")),
                     target_source="schedule",
-                    raw_funding_rate=raw_eight_hour_rate,
+                    raw_funding_rate=raw_hourly_rate,
                     raw_rate_unit="decimal",
-                    source_tenor_hours=8,
-                    transform_version=_EIGHT_HOUR_TO_HOURLY_TRANSFORM,
+                    source_tenor_hours=1,
+                    transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(item.get("open_interest")),
                     volume_24h=self.as_float(item.get("volume_24h")),
                 )

@@ -466,16 +466,21 @@ async def test_hotstuff_uses_price_index_and_excludes_delisted_instruments(
     assert result.instruments[0].metadata["spot_carry_eligible"] is False
     assert result.instruments[1].metadata["asset_class"] == "index"
     assert result.instruments[1].metadata["spot_carry_eligible"] is False
+    assert result.instruments[0].metadata["current_rate_tenor_hours"] == 1
+    assert (
+        result.instruments[0].metadata["ticker_rate_semantics"]
+        == "hourly_payment_rate"
+    )
     snapshot = result.snapshots[0]
-    assert snapshot.funding_rate == pytest.approx(0.0004 / 8)
+    assert snapshot.funding_rate == pytest.approx(0.0004)
     assert snapshot.raw_funding_rate == pytest.approx(0.0004)
     assert snapshot.raw_rate_unit == "decimal"
-    assert snapshot.source_tenor_hours == 8
-    assert snapshot.transform_version == "eight-hour-to-hourly-v1"
+    assert snapshot.source_tenor_hours == 1
+    assert snapshot.transform_version == "identity-v1"
     assert snapshot.next_funding_at == datetime(
         2026, 7, 11, 11, tzinfo=timezone.utc
     )
-    assert result.funding[0].rate == pytest.approx(0.0004 / 8)
+    assert result.funding[0].rate == pytest.approx(0.0004)
     assert result.funding[0].interval_hours == 1
 
 

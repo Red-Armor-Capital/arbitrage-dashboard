@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import duckdb
@@ -8,6 +9,7 @@ import pytest
 from backend.app.prediction import PredictionMinute
 from backend.app.storage import (
     CarryStore,
+    HOTSTUFF_HOURLY_MIGRATION_VERSION,
     PREDICTION_MIGRATION_VERSION,
     PREDICTION_MINUTE_COLUMNS,
 )
@@ -95,6 +97,10 @@ def test_migration_preserves_existing_tables_and_is_idempotent(tmp_path) -> None
             "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
             (PREDICTION_MIGRATION_VERSION,),
         ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        ).fetchone()[0] == 1
         assert {
             row[0]
             for row in conn.execute("SHOW TABLES").fetchall()
@@ -103,6 +109,160 @@ def test_migration_preserves_existing_tables_and_is_idempotent(tmp_path) -> None
             "funding_prediction_collector_status",
             "funding_prediction_archives",
         }
+
+
+def test_hotstuff_hourly_migration_repairs_predictions_without_touching_settled(
+    tmp_path,
+) -> None:
+    path = tmp_path / "legacy-hotstuff.duckdb"
+    store = CarryStore(path)
+    minute = datetime(2026, 7, 11, 10, 0, tzinfo=UTC)
+
+    with store._connect() as conn:
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        )
+        conn.execute(
+            """
+            INSERT INTO instruments VALUES (
+                'hotstuff', 'AAPL-PERP', 'AAPL', 'AAPL', 'perpetual', 'USDC',
+                1, -0.00002, 0.00025, TRUE,
+                '{"current_rate_tenor_hours":8,"spot_carry_eligible":true}', ?
+            )
+            """,
+            (minute,),
+        )
+        conn.execute(
+            """
+            INSERT INTO current_market VALUES (
+                'hotstuff', 'AAPL-PERP', 'AAPL', ?, 100, 101, 100.5, 100.4,
+                0.00005, 1, ?, 10, 1000
+            )
+            """,
+            (minute, minute + timedelta(hours=1)),
+        )
+        for kind, rate in (("current", 0.00005), ("settled", 0.0004)):
+            conn.execute(
+                """
+                INSERT INTO funding_rates VALUES (
+                    'hotstuff', 'AAPL-PERP', 'AAPL', ?, ?, ?, 1, ?
+                )
+                """,
+                (minute, minute + timedelta(hours=1), rate, kind),
+            )
+        conn.execute(
+            """
+            INSERT INTO funding_prediction_minutes VALUES (
+                'hotstuff', 'AAPL-PERP', 'AAPL', ?, ?, ?, NULL, ?, 'schedule',
+                0.0004, 'decimal', 8,
+                0.000025, 0.000075, -0.0000125, 0.00005,
+                1, 2, 100.5, 100.4, 'eight-hour-to-hourly-v1'
+            )
+            """,
+            (
+                minute,
+                minute + timedelta(seconds=5),
+                minute + timedelta(seconds=35),
+                minute + timedelta(hours=1),
+            ),
+        )
+
+    CarryStore(path)
+    CarryStore(path)
+
+    with duckdb.connect(str(path)) as conn:
+        prediction = conn.execute(
+            """
+            SELECT raw_rate_close, source_tenor_hours,
+                   normalized_rate_open, normalized_rate_high,
+                   normalized_rate_low, normalized_rate_close,
+                   transform_version, raw_rate_unit,
+                   settlement_interval_hours, sample_count,
+                   minute_at, target_funding_at
+            FROM funding_prediction_minutes
+            """
+        ).fetchone()
+        assert prediction[:6] == pytest.approx(
+            (0.0004, 1, 0.0002, 0.0006, -0.0001, 0.0004),
+            rel=0,
+            abs=1e-15,
+        )
+        assert prediction[6] == "identity-v1"
+        assert prediction[7:] == (
+            "decimal",
+            1,
+            2,
+            minute,
+            minute + timedelta(hours=1),
+        )
+        assert conn.execute(
+            "SELECT funding_rate FROM current_market WHERE venue = 'hotstuff'"
+        ).fetchone()[0] == pytest.approx(0.0004)
+        assert dict(
+            conn.execute(
+                "SELECT kind, rate FROM funding_rates WHERE venue = 'hotstuff'"
+            ).fetchall()
+        ) == {
+            "current": pytest.approx(0.0004),
+            "settled": pytest.approx(0.0004),
+        }
+        metadata = json.loads(
+            conn.execute(
+                "SELECT metadata_json FROM instruments WHERE venue = 'hotstuff'"
+            ).fetchone()[0]
+        )
+        assert metadata["current_rate_tenor_hours"] == 1
+        assert metadata["ticker_rate_semantics"] == "hourly_payment_rate"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        ).fetchone()[0] == 1
+
+
+def test_hotstuff_hourly_migration_rolls_back_unexpected_legacy_transform(
+    tmp_path,
+) -> None:
+    path = tmp_path / "invalid-hotstuff.duckdb"
+    store = CarryStore(path)
+    minute = datetime(2026, 7, 11, 10, 0, tzinfo=UTC)
+
+    with store._connect() as conn:
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        )
+        conn.execute(
+            """
+            INSERT INTO funding_prediction_minutes VALUES (
+                'hotstuff', 'AAPL-PERP', 'AAPL', ?, ?, ?, NULL, ?, 'schedule',
+                0.0004, 'decimal', 8,
+                0.0002, 0.0002, 0.0002, 0.0002,
+                1, 1, 100.5, 100.4, 'eight-hour-to-hourly-v1'
+            )
+            """,
+            (
+                minute,
+                minute + timedelta(seconds=5),
+                minute + timedelta(seconds=5),
+                minute + timedelta(hours=1),
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="unexpected rate transform"):
+        CarryStore(path)
+
+    with duckdb.connect(str(path)) as conn:
+        assert conn.execute(
+            """
+            SELECT source_tenor_hours, normalized_rate_close, transform_version
+            FROM funding_prediction_minutes
+            """
+        ).fetchone() == (8, 0.0002, "eight-hour-to-hourly-v1")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        ).fetchone()[0] == 0
 
 
 def test_flush_and_watermark_are_idempotent(tmp_path) -> None:

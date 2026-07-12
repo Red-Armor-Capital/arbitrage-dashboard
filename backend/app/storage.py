@@ -12,6 +12,7 @@ from .prediction import PredictionMinute
 
 
 PREDICTION_MIGRATION_VERSION = "20260711_01_prediction_minutes"
+HOTSTUFF_HOURLY_MIGRATION_VERSION = "20260712_02_hotstuff_ticker_hourly"
 PREDICTION_MINUTE_COLUMNS = (
     "venue",
     "symbol",
@@ -133,76 +134,161 @@ class CarryStore:
             "SELECT 1 FROM schema_migrations WHERE version = ?",
             (PREDICTION_MIGRATION_VERSION,),
         ).fetchone()
-        if already_applied:
+        if not already_applied:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE funding_prediction_minutes (
+                        venue VARCHAR NOT NULL,
+                        symbol VARCHAR NOT NULL,
+                        underlying VARCHAR NOT NULL,
+                        minute_at TIMESTAMPTZ NOT NULL,
+                        first_observed_at TIMESTAMPTZ NOT NULL,
+                        last_observed_at TIMESTAMPTZ NOT NULL,
+                        source_observed_at TIMESTAMPTZ,
+                        target_funding_at TIMESTAMPTZ NOT NULL,
+                        target_source VARCHAR NOT NULL,
+                        raw_rate_close DOUBLE NOT NULL,
+                        raw_rate_unit VARCHAR NOT NULL,
+                        source_tenor_hours DOUBLE NOT NULL,
+                        normalized_rate_open DOUBLE NOT NULL,
+                        normalized_rate_high DOUBLE NOT NULL,
+                        normalized_rate_low DOUBLE NOT NULL,
+                        normalized_rate_close DOUBLE NOT NULL,
+                        settlement_interval_hours DOUBLE NOT NULL,
+                        sample_count INTEGER NOT NULL,
+                        mark_price_close DOUBLE,
+                        index_price_close DOUBLE,
+                        transform_version VARCHAR NOT NULL,
+                        CHECK (source_tenor_hours > 0),
+                        CHECK (settlement_interval_hours > 0),
+                        CHECK (sample_count > 0)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE funding_prediction_collector_status (
+                        venue VARCHAR PRIMARY KEY,
+                        status VARCHAR NOT NULL,
+                        last_success_at TIMESTAMPTZ,
+                        last_flushed_minute TIMESTAMPTZ,
+                        expected_symbols INTEGER NOT NULL,
+                        sampled_symbols_last_minute INTEGER NOT NULL,
+                        coverage_60m DOUBLE NOT NULL,
+                        missed_minutes_60m INTEGER NOT NULL,
+                        hot_rows BIGINT NOT NULL,
+                        archived_rows BIGINT NOT NULL,
+                        last_error VARCHAR,
+                        updated_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE funding_prediction_archives (
+                        month_start DATE PRIMARY KEY,
+                        file_path VARCHAR NOT NULL,
+                        row_count BIGINT NOT NULL,
+                        min_minute_at TIMESTAMPTZ NOT NULL,
+                        max_minute_at TIMESTAMPTZ NOT NULL,
+                        file_size_bytes BIGINT NOT NULL,
+                        status VARCHAR NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        validated_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?, ?)",
+                    (PREDICTION_MIGRATION_VERSION, datetime.now(timezone.utc)),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+        hotstuff_migration_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
+        ).fetchone()
+        if hotstuff_migration_applied:
             return
+
         conn.execute("BEGIN TRANSACTION")
         try:
+            invalid_legacy_rows = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM funding_prediction_minutes
+                WHERE venue = 'hotstuff'
+                  AND transform_version = 'eight-hour-to-hourly-v1'
+                  AND (
+                      source_tenor_hours <> 8
+                      OR raw_rate_unit <> 'decimal'
+                      OR settlement_interval_hours <> 1
+                      OR NOT isfinite(raw_rate_close)
+                      OR NOT isfinite(normalized_rate_open)
+                      OR NOT isfinite(normalized_rate_high)
+                      OR NOT isfinite(normalized_rate_low)
+                      OR NOT isfinite(normalized_rate_close)
+                      OR abs(normalized_rate_close * 8 - raw_rate_close)
+                         > greatest(1e-15, abs(raw_rate_close) * 1e-12)
+                  )
+                """
+            ).fetchone()[0]
+            if invalid_legacy_rows:
+                raise RuntimeError(
+                    "Hotstuff hourly migration found legacy rows with an "
+                    "unexpected rate transform"
+                )
+
             conn.execute(
                 """
-                CREATE TABLE funding_prediction_minutes (
-                    venue VARCHAR NOT NULL,
-                    symbol VARCHAR NOT NULL,
-                    underlying VARCHAR NOT NULL,
-                    minute_at TIMESTAMPTZ NOT NULL,
-                    first_observed_at TIMESTAMPTZ NOT NULL,
-                    last_observed_at TIMESTAMPTZ NOT NULL,
-                    source_observed_at TIMESTAMPTZ,
-                    target_funding_at TIMESTAMPTZ NOT NULL,
-                    target_source VARCHAR NOT NULL,
-                    raw_rate_close DOUBLE NOT NULL,
-                    raw_rate_unit VARCHAR NOT NULL,
-                    source_tenor_hours DOUBLE NOT NULL,
-                    normalized_rate_open DOUBLE NOT NULL,
-                    normalized_rate_high DOUBLE NOT NULL,
-                    normalized_rate_low DOUBLE NOT NULL,
-                    normalized_rate_close DOUBLE NOT NULL,
-                    settlement_interval_hours DOUBLE NOT NULL,
-                    sample_count INTEGER NOT NULL,
-                    mark_price_close DOUBLE,
-                    index_price_close DOUBLE,
-                    transform_version VARCHAR NOT NULL,
-                    CHECK (source_tenor_hours > 0),
-                    CHECK (settlement_interval_hours > 0),
-                    CHECK (sample_count > 0)
-                )
+                UPDATE funding_prediction_minutes
+                SET source_tenor_hours = 1,
+                    normalized_rate_open = normalized_rate_open * 8,
+                    normalized_rate_high = normalized_rate_high * 8,
+                    normalized_rate_low = normalized_rate_low * 8,
+                    normalized_rate_close = raw_rate_close,
+                    transform_version = 'identity-v1'
+                WHERE venue = 'hotstuff'
+                  AND source_tenor_hours = 8
+                  AND transform_version = 'eight-hour-to-hourly-v1'
+                  AND raw_rate_unit = 'decimal'
+                  AND settlement_interval_hours = 1
                 """
             )
             conn.execute(
                 """
-                CREATE TABLE funding_prediction_collector_status (
-                    venue VARCHAR PRIMARY KEY,
-                    status VARCHAR NOT NULL,
-                    last_success_at TIMESTAMPTZ,
-                    last_flushed_minute TIMESTAMPTZ,
-                    expected_symbols INTEGER NOT NULL,
-                    sampled_symbols_last_minute INTEGER NOT NULL,
-                    coverage_60m DOUBLE NOT NULL,
-                    missed_minutes_60m INTEGER NOT NULL,
-                    hot_rows BIGINT NOT NULL,
-                    archived_rows BIGINT NOT NULL,
-                    last_error VARCHAR,
-                    updated_at TIMESTAMPTZ NOT NULL
-                )
+                UPDATE current_market
+                SET funding_rate = funding_rate * 8
+                WHERE venue = 'hotstuff'
+                  AND funding_rate IS NOT NULL
                 """
             )
             conn.execute(
                 """
-                CREATE TABLE funding_prediction_archives (
-                    month_start DATE PRIMARY KEY,
-                    file_path VARCHAR NOT NULL,
-                    row_count BIGINT NOT NULL,
-                    min_minute_at TIMESTAMPTZ NOT NULL,
-                    max_minute_at TIMESTAMPTZ NOT NULL,
-                    file_size_bytes BIGINT NOT NULL,
-                    status VARCHAR NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    validated_at TIMESTAMPTZ NOT NULL
+                UPDATE funding_rates
+                SET rate = rate * 8
+                WHERE venue = 'hotstuff'
+                  AND kind = 'current'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE instruments
+                SET metadata_json = json_merge_patch(
+                    metadata_json,
+                    '{"current_rate_tenor_hours":1,"ticker_rate_semantics":"hourly_payment_rate"}'
                 )
+                WHERE venue = 'hotstuff'
                 """
             )
             conn.execute(
                 "INSERT INTO schema_migrations VALUES (?, ?)",
-                (PREDICTION_MIGRATION_VERSION, datetime.now(timezone.utc)),
+                (HOTSTUFF_HOURLY_MIGRATION_VERSION, datetime.now(timezone.utc)),
             )
             conn.execute("COMMIT")
         except Exception:
