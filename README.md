@@ -6,10 +6,13 @@
 
 - 从链上平台官方分类或复核目录自动发现股票/ETF 永续，并统一映射到底层代码；CEX 继续按配置的关注列表采集。
 - 每 30 秒采集当前 mark/index/BBO 和下一期指示资金费率。
+- 将五个 DEX 的有效预测快照按 UTC 分钟聚合为 OHLC，保留原始单位、原始 tenor、目标结算时刻、价格和转换版本；不对缺失分钟做前值填充。
+- 分钟数据在 DuckDB 中至少保留 90 天，完整旧月份经校验后归档为永久 ZSTD Parquet。
 - 将已结算资金费写入 DuckDB，按共同小时窗口比较两个平台；历史回填按标的独立跟踪，失败标的单独重试。
 - 对正资金费链上永续生成“多合成现货、空永续”研究候选；现货价格明确假设为与该永续 mark/index 同价，Funding 为 0。
 - 展示当前预测 Carry、7 日已结算均值、年化波动率、正 Carry 占比、往返 taker 费和手续费回本时间。
 - 当前预测年化、7 日已结算均值、年化波动率和正 Carry 占比支持表头升降序排序。
+- 可按用户实际拥有账户的 DEX 多选过滤机会，并在浏览器本地保存选择；合成现货腿不受 DEX 账户筛选影响。
 - 预测值与已结算值严格分离；不足 24 小时重叠样本的组合不会标为“稳定”。
 - 对跨平台价格偏差超过 10% 的组合做安全过滤，避免把合约乘数或错误 symbol mapping 当成套利。
 
@@ -33,6 +36,8 @@ npm ci
 PYTHONPATH=. .venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
+分钟采集器依赖单写入器和事务 watermark，请保持 `--workers 1`。
+
 终端二：
 
 ```bash
@@ -50,6 +55,10 @@ npm run dev
 - `CARRY_REFRESH_SECONDS`：实时刷新间隔。
 - `CARRY_HISTORY_LOOKBACK_DAYS`：统计窗口。
 - `CARRY_DATABASE_PATH`：DuckDB 路径。
+- `CARRY_PREDICTION_COLLECTION_ENABLED`：是否启用五个 DEX 的分钟预测采集，仓库默认关闭；需要长期采集的实例应显式设为 `true`。
+- `CARRY_PREDICTION_HOT_DAYS`：DuckDB 至少保留的分钟数据天数，默认 90。
+- `CARRY_PREDICTION_ARCHIVE_DIR`：永久月度 Parquet 归档目录。
+- `CARRY_PREDICTION_STATUS_WINDOW_MINUTES`：采集覆盖率状态窗口，默认 60 分钟。
 
 公开 API 会受到所在地区网络策略影响。单个平台暂时离线时，后端会保留已有历史并继续刷新其他平台；状态不会伪装成健康。
 
@@ -76,7 +85,7 @@ simple_apr = hourly_carry × 24 × 365
 - `当前预测年化` 使用各平台当前/预计下一期 funding，只用于发现机会，会在结算前变化。
 - 永续—永续的 `7D 已结算均值`、波动率和正 Carry 占比只使用双方实际已结算历史的重叠小时。
 - 合成现货—永续的历史统计只使用空头永续的实际已结算 funding，合成现货 funding 始终视为 0；不会用当前预测伪造历史。
-- Hotstuff ticker 的 8 小时展示费率会先换算为小时费率；历史统计使用公开账户的精确已结算 Funding 支付记录，并对重复或冲突记录做安全校验。
+- Hotstuff 产品页面会展示 8 小时口径，但公开 ticker API 的 `funding_rate` 已是实际小时支付率，本项目按 1 小时 decimal 原值使用；历史统计使用公开账户的精确已结算 Funding 支付记录，并对重复或冲突记录做安全校验。
 - 离散结算的 N 小时资金费会向前展开到其覆盖的 N 个小时，避免把上一期结算率泄漏到下一期。
 - `往返手续费 = 2 × (多头平台 taker 费 + 空头平台 taker 费)`，即两边开仓和两边平仓。
 - 合成现货—永续目前仅计 `2 × 空头永续 taker 费`；由于没有真实券商腿，现货佣金、融资/现金机会成本、滑点、税费、过夜费用和基差均暂按 0，并在 API/UI 中标为假设口径。
@@ -89,6 +98,7 @@ simple_apr = hourly_carry × 24 × 365
 - DuckDB：`data/carry.duckdb`
 - `GET /api/dashboard`：汇总、机会列表、平台状态。
 - `GET /api/venues`：平台连接状态。
+- `GET /api/prediction-collector/status`：分钟采集、覆盖率、热数据和归档状态。
 - `POST /api/refresh`：手动触发一次公开数据刷新。
 
 数据库表：
@@ -97,6 +107,12 @@ simple_apr = hourly_carry × 24 × 365
 - `current_market`：最新行情与指示资金费。
 - `funding_rates`：`current` 与 `settled` 分类型保存。
 - `venue_status`：健康状态、错误、延迟和标的数量。
+- `funding_prediction_minutes`：无索引的分钟预测热表。
+- `funding_prediction_collector_status`：各 DEX 采集水位、覆盖率和错误。
+- `funding_prediction_archives`：已验证月度 Parquet 清单。
+- `schema_migrations`：数据库迁移版本。
+
+永久归档按 `year=YYYY/month=MM/funding_predictions.parquet` 保存。归档通过 schema、行数和时间范围校验并登记清单后，才会删除对应热表月份；归档文件不会自动覆盖或删除。
 
 ## 验证
 

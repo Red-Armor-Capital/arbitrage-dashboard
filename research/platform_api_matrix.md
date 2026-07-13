@@ -79,7 +79,7 @@
 | Lighter | `GET /api/v1/orderBooks` | `/orderBookDetails`、`/orderBookOrders`、`/funding-rates` | `/api/v1/fundings`，最多约 750 | 标准账户 0%/0%；Premium 0.004%/0.028% | 标准 REST 约 60/min；current rate 是标准化 8h 值，历史 `rate` 是百分数且带 `direction` | 已实现并实时验证 |
 | Extended | `GET /api/v1/info/markets`，筛 `category=TradFi`、`subCategory=Equity` | 同一响应的 `marketStats` 含 BBO/mark/index/funding | `/api/v1/info/{market}/funding`，最多 10,000，支持 cursor | 0%/0.025% | 约 1,000/min/IP；`name` 才是 API market id，不能用 UI name | 已实现并实时验证 |
 | trade[XYZ] / Hyperliquid HIP-3 | `POST /info`：`perpCategories` + `metaAndAssetCtxs(dex=xyz)` | context 含 funding/oracle/mark/mid/impact/OI/volume；`l2Book` 可取盘口 | `fundingHistory`，每次最多 500 | Growth Mode 0.003%/0.009%；标准 HIP-3 0.03%/0.09% | 1,200 weighted/min/IP；symbol 必须保留 `xyz:` 前缀 | 已实现并实时验证 |
-| Hotstuff | `POST /info`，method=`instruments` | method=`ticker`，含 BBO/mark/index/current funding | 当前无公开 market-wide settled history | -0.002%/0.025% | `/info` 约 5,000/min；只能把 current 当预测，不能伪造成 settled history | 已实现并实时验证 |
+| Hotstuff | `POST /info`，method=`instruments` | method=`ticker`，含 BBO/mark/index/current funding | `funding_history` 是账户级精确支付历史；以已覆盖全部股票/ETF 的公共观察账户抽取，并逐笔校验 payment | -0.002%/0.025% | `/info` 约 5,000/min；公共账户没有持仓的小时会自然缺失，不能视为 market-wide 完整历史 | 已实现并实时验证 |
 | Orderly | `GET /v1/public/info` | `/v1/public/futures` + `/v1/public/funding_rates` | `/v1/public/funding_rate_history` | base 0%/0.05%；builder 可能覆盖 | 公开 funding 接口 10/s/IP；stock 当前保守纳入原生 GOOGL/TSLA/NVDA | 已实现并实时验证 |
 | Aster | `/fapi/v3/exchangeInfo`、bookTicker、premiumIndex | Binance-like market API | funding history | 0%/0.04% | 文档 symbol 示例冲突且当前环境可能受 WAF/地区限制，必须以 live exchangeInfo 为准 | 研究完成，暂未启用 |
 
@@ -89,12 +89,14 @@
 - Lighter `/fundings` 的 `rate` 是 percent unit，例如 `0.0004` 表示 0.0004%，转 decimal 还需除以 100；正负由 `direction` 决定。
 - Hyperliquid/XYZ context 和 `fundingHistory` 均按小时 decimal rate 处理。
 - Extended 历史文档明确说明记录是实际用于每小时 funding payment 的 rate，可直接作为 settled。
+- Hotstuff 产品文档区分 8 小时展示率与小时支付率，但 ticker API 的 `funding_rate` 实测已与账户支付记录中的小时 rate 同口径，应按 1 小时 decimal 原值使用，不能再次除以 8。
 - Orderly `est_funding_rate` 是预测；`last_funding_rate` 和 history 是结算记录。股票原生合约当前多为 8 小时，但应以 `funding_period` 动态读取。
 
 官方资料：
 
 - [Extended API](https://api.docs.extended.exchange/)
 - [Hyperliquid Info Endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+- [Hotstuff Funding Rates](https://docs.hotstuff.trade/hotstuff-docs/trading/funding-rates)
 - [Orderly Predicted Funding](https://orderly.network/docs/build-on-omnichain/restful-api/public/get-predicted-funding-rates-for-all-markets)
 - [Orderly Funding History](https://orderly.network/docs/build-on-omnichain/restful-api/public/get-funding-rate-history-for-one-market)
 - [Orderly Funding Rules](https://orderly.network/docs/introduction/trade-on-orderly/perpetual-futures/funding-rate)
@@ -177,7 +179,7 @@ spot_perp_round_trip_fee = 2 × short_perp_taker_fee
 
 - 2026-07-11 本机已实时连接 Gate、Lighter、Extended、trade[XYZ]、Hotstuff、Orderly，共 6 个健康公开数据源。
 - Binance、Bitget、Bybit、Kraken、OKX 适配器已实现，但本机出口出现超时/拒绝；状态正确显示 offline，不回退到伪数据。
-- DuckDB 已取得 Gate/Lighter、XYZ/Lighter、Orderly 等组合的已结算重叠历史；Extended 和 Hotstuff 在没有双方历史时只显示当前预测。
+- DuckDB 已取得 Gate/Lighter、XYZ/Lighter、Orderly 等组合的已结算重叠历史；Hotstuff 使用公共观察账户的已验证支付记录，缺失小时保持为空，不伪造 market-wide 历史。
 - Aster 先列入 watchlist，待能稳定访问 live `exchangeInfo` 后再启用。
 - Moomoo、IBKR、Schwab 尚未接入运行态，因为分别需要 OpenD/券商会话/OAuth App；目前的合成现货腿不冒充这些券商报价。接入真实现货前需要用户提供本机网关或已获批只读凭据，但不需要授予自动交易权限。
 - 当前没有计算盘口可成交深度、滑点、保证金效率、清算缓冲、稳定币/桥风险和税务成本；这些是进入实盘评估前的下一层门槛。

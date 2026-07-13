@@ -37,6 +37,10 @@ def _millis(value: object) -> datetime | None:
 def _seconds(value: object) -> datetime | None:
     if value in (None, "", 0, "0"):
         return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def _iso_datetime(value: object) -> datetime | None:
@@ -51,12 +55,18 @@ def _iso_datetime(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _source_datetime(value: object) -> datetime | None:
+    """Parse an optional venue timestamp without inventing a source time."""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return _iso_datetime(value)
+    return _millis(numeric) if abs(numeric) >= 100_000_000_000 else _seconds(numeric)
+
+
 def _hour_floor(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    try:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
-        return None
 
 
 def _rows(payload: Any) -> list[dict[str, Any]]:
@@ -82,8 +92,59 @@ def _truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"1", "true", "yes", "enabled"}
 
 
-def _next_hour() -> datetime:
-    return utc_now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+def _strict_next_utc_hour(observed_at: datetime | None = None) -> datetime:
+    """Return the next UTC hour boundary, never the current boundary."""
+
+    observed = (observed_at or utc_now()).astimezone(timezone.utc)
+    return _hour_floor(observed) + timedelta(hours=1)
+
+
+def _future_target(
+    candidate: datetime | None,
+    observed_at: datetime,
+) -> datetime | None:
+    """Accept an API target only when it is strictly in the future."""
+
+    if candidate is None:
+        return None
+    normalized = candidate.astimezone(timezone.utc)
+    return normalized if normalized > observed_at.astimezone(timezone.utc) else None
+
+
+_SUPPORTED_FUNDING_INTERVALS = (1.0, 2.0, 4.0, 8.0)
+_INTERVAL_TOLERANCE_HOURS = 5 / 60
+_IDENTITY_TRANSFORM = "identity-v1"
+_PERCENT_TO_DECIMAL_TRANSFORM = "percent-to-decimal-v1"
+_EIGHT_HOUR_TO_HOURLY_TRANSFORM = "eight-hour-to-hourly-v1"
+
+
+def _canonical_funding_interval(interval_hours: float) -> float | None:
+    if not math.isfinite(interval_hours) or interval_hours <= 0:
+        return None
+    for supported in _SUPPORTED_FUNDING_INTERVALS:
+        if math.isclose(
+            interval_hours,
+            supported,
+            rel_tol=0,
+            abs_tol=_INTERVAL_TOLERANCE_HOURS,
+        ):
+            return supported
+    return None
+
+
+def _next_utc_funding_boundary(
+    observed_at: datetime,
+    interval_hours: float,
+) -> datetime:
+    """Derive a strict UTC settlement boundary for standard funding tenors."""
+
+    interval = _canonical_funding_interval(interval_hours)
+    if interval is None:
+        return _strict_next_utc_hour(observed_at)
+    period_seconds = int(interval * 3600)
+    timestamp = observed_at.astimezone(timezone.utc).timestamp()
+    next_timestamp = (math.floor(timestamp / period_seconds) + 1) * period_seconds
+    return datetime.fromtimestamp(next_timestamp, tz=timezone.utc)
 
 
 async def _gather_limited(
@@ -206,32 +267,51 @@ class LighterAdapter(VenueAdapter):
 
         snapshots: list[MarketSnapshot] = []
         current: list[FundingRate] = []
+        collection_observed = utc_now()
         for instrument in instruments:
             detail = detail_by_symbol.get(instrument.symbol, {})
             market_id = str(instrument.metadata.get("market_id") or "")
             funding_item = funding_by_market.get(market_id) or funding_by_market.get(instrument.symbol) or {}
-            detail_rate = self.as_float(
-                detail.get("current_funding_rate") or detail.get("funding_rate")
+            detail_rate_value = (
+                detail.get("current_funding_rate")
+                if "current_funding_rate" in detail
+                else detail.get("currentFundingRate")
             )
-            normalized_eight_hour_rate = self.as_float(
-                funding_item.get("rate") or funding_item.get("funding_rate")
+            detail_rate = self.as_float(detail_rate_value)
+            normalized_rate_value = (
+                funding_item.get("rate")
+                if "rate" in funding_item
+                else funding_item.get("funding_rate")
             )
+            normalized_eight_hour_rate = self.as_float(normalized_rate_value)
             if detail_rate is not None:
                 rate = detail_rate / 100
+                raw_rate = detail_rate
+                raw_rate_unit = "percent"
+                source_tenor_hours = 1.0
+                transform_version = _PERCENT_TO_DECIMAL_TRANSFORM
             elif normalized_eight_hour_rate is not None:
                 rate = normalized_eight_hour_rate / 8
+                raw_rate = normalized_eight_hour_rate
+                raw_rate_unit = "decimal"
+                source_tenor_hours = 8.0
+                transform_version = _EIGHT_HOUR_TO_HOURLY_TRANSFORM
             else:
                 rate = None
-            next_funding = _seconds(
-                detail.get("funding_timestamp") or funding_item.get("funding_timestamp")
-            )
-            if next_funding is None:
-                next_funding = _next_hour()
+                raw_rate = None
+                raw_rate_unit = "decimal"
+                source_tenor_hours = None
+                transform_version = _IDENTITY_TRANSFORM
+            # Lighter's funding_timestamp is the last settled round, not the
+            # target of current_funding_rate. Current estimates settle on the
+            # next strict UTC hour.
+            next_funding = _strict_next_utc_hour(collection_observed)
             snapshots.append(
                 MarketSnapshot(
                     venue=self.venue,
                     symbol=instrument.symbol,
                     underlying=instrument.underlying,
+                    observed_at=collection_observed,
                     bid=self.as_float(detail.get("best_bid_price") or detail.get("best_bid")),
                     ask=self.as_float(detail.get("best_ask_price") or detail.get("best_ask")),
                     mark_price=self.as_float(
@@ -241,6 +321,12 @@ class LighterAdapter(VenueAdapter):
                     funding_rate=rate,
                     funding_interval_hours=1,
                     next_funding_at=next_funding,
+                    source_observed_at=_source_datetime(detail.get("timestamp")),
+                    target_source="schedule",
+                    raw_funding_rate=raw_rate,
+                    raw_rate_unit=raw_rate_unit,
+                    source_tenor_hours=source_tenor_hours,
+                    transform_version=transform_version,
                     open_interest=self.as_float(detail.get("open_interest")),
                     volume_24h=self.as_float(detail.get("daily_quote_token_volume")),
                 )
@@ -251,6 +337,7 @@ class LighterAdapter(VenueAdapter):
                         venue=self.venue,
                         symbol=instrument.symbol,
                         underlying=instrument.underlying,
+                        observed_at=collection_observed,
                         effective_at=next_funding,
                         rate=rate,
                         interval_hours=1,
@@ -359,17 +446,35 @@ class ExtendedAdapter(VenueAdapter):
 
         snapshots: list[MarketSnapshot] = []
         current: list[FundingRate] = []
+        collection_observed = utc_now()
         for instrument in instruments:
             stats = stats_by_symbol.get(instrument.symbol, {})
-            rate = self.as_float(stats.get("fundingRate") or stats.get("funding_rate"))
-            next_funding = _millis(stats.get("nextFundingTime") or stats.get("fundingTimestamp"))
-            if next_funding is None:
-                next_funding = _next_hour()
+            rate_value = (
+                stats.get("fundingRate")
+                if "fundingRate" in stats
+                else stats.get("funding_rate")
+            )
+            rate = self.as_float(rate_value)
+            target_value = (
+                stats.get("nextFundingTime")
+                if "nextFundingTime" in stats
+                else stats.get("nextFundingRate")
+            )
+            if target_value in (None, "", 0, "0"):
+                target_value = stats.get("fundingTimestamp")
+            api_target = _future_target(_millis(target_value), collection_observed)
+            if api_target is not None:
+                next_funding = api_target
+                target_source = "api"
+            else:
+                next_funding = _strict_next_utc_hour(collection_observed)
+                target_source = "schedule"
             snapshots.append(
                 MarketSnapshot(
                     venue=self.venue,
                     symbol=instrument.symbol,
                     underlying=instrument.underlying,
+                    observed_at=collection_observed,
                     bid=self.as_float(stats.get("bestBid") or stats.get("bidPrice")),
                     ask=self.as_float(stats.get("bestAsk") or stats.get("askPrice")),
                     mark_price=self.as_float(stats.get("markPrice")),
@@ -377,6 +482,14 @@ class ExtendedAdapter(VenueAdapter):
                     funding_rate=rate,
                     funding_interval_hours=1,
                     next_funding_at=next_funding,
+                    source_observed_at=_source_datetime(
+                        stats.get("updatedTime") or stats.get("timestamp")
+                    ),
+                    target_source=target_source,
+                    raw_funding_rate=rate,
+                    raw_rate_unit="decimal",
+                    source_tenor_hours=1,
+                    transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(stats.get("openInterest")),
                     volume_24h=self.as_float(stats.get("dailyVolume") or stats.get("volume24h")),
                 )
@@ -387,6 +500,7 @@ class ExtendedAdapter(VenueAdapter):
                         venue=self.venue,
                         symbol=instrument.symbol,
                         underlying=instrument.underlying,
+                        observed_at=collection_observed,
                         effective_at=next_funding,
                         rate=rate,
                         interval_hours=1,
@@ -475,6 +589,8 @@ class XyzAdapter(VenueAdapter):
             raise RuntimeError("Hyperliquid stock category is empty; refusing to classify markets")
         instruments: list[Instrument] = []
         snapshots: list[MarketSnapshot] = []
+        collection_observed = utc_now()
+        next_funding = _strict_next_utc_hour(collection_observed)
         universe = meta.get("universe", [])
         if not isinstance(universe, list) or len(universe) != len(contexts):
             raise RuntimeError("Hyperliquid universe/context length mismatch")
@@ -516,18 +632,26 @@ class XyzAdapter(VenueAdapter):
             )
             instruments.append(instrument)
             impact = ctx.get("impactPxs") or []
+            rate = self.as_float(ctx.get("funding"))
             snapshots.append(
                 MarketSnapshot(
                     venue=self.venue,
                     symbol=coin,
                     underlying=spec.underlying,
+                    observed_at=collection_observed,
                     bid=self.as_float(impact[0]) if len(impact) > 0 else None,
                     ask=self.as_float(impact[1]) if len(impact) > 1 else None,
                     mark_price=self.as_float(ctx.get("markPx")),
                     index_price=self.as_float(ctx.get("oraclePx")),
-                    funding_rate=self.as_float(ctx.get("funding")),
+                    funding_rate=rate,
                     funding_interval_hours=1,
-                    next_funding_at=None,
+                    next_funding_at=next_funding,
+                    source_observed_at=None,
+                    target_source="schedule",
+                    raw_funding_rate=rate,
+                    raw_rate_unit="decimal",
+                    source_tenor_hours=1,
+                    transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(ctx.get("openInterest")),
                     volume_24h=self.as_float(ctx.get("dayNtlVlm")),
                 )
@@ -538,7 +662,8 @@ class XyzAdapter(VenueAdapter):
                 venue=self.venue,
                 symbol=item.symbol,
                 underlying=item.underlying,
-                effective_at=utc_now().replace(minute=0, second=0, microsecond=0),
+                observed_at=collection_observed,
+                effective_at=next_funding,
                 rate=snapshot.funding_rate,
                 interval_hours=1,
                 kind="current",
@@ -639,8 +764,9 @@ class HotstuffAdapter(VenueAdapter):
                         "instrument_id": item.get("id"),
                         "funding_model": "discrete_snapshot",
                         "history_source": "public_account_funding_history",
-                        "current_rate_tenor_hours": 8,
+                        "current_rate_tenor_hours": 1,
                         "settlement_interval_hours": 1,
+                        "ticker_rate_semantics": "hourly_payment_rate",
                         "price_index": price_index,
                         "growth_mode": item.get("growth_mode") or item.get("growthMode"),
                         "delisted": False,
@@ -652,6 +778,7 @@ class HotstuffAdapter(VenueAdapter):
         instrument_map = {item.symbol: item for item in instruments}
         snapshots: list[MarketSnapshot] = []
         current: list[FundingRate] = []
+        collection_observed = utc_now()
         for item in _rows(ticker_response.json()):
             symbol = str(item.get("symbol") or item.get("s") or "")
             instrument = instrument_map.get(symbol)
@@ -662,21 +789,19 @@ class HotstuffAdapter(VenueAdapter):
                 if "funding_rate" in item
                 else item.get("fundingRate")
             )
-            raw_eight_hour_rate = self.as_float(raw_rate_value)
-            # Hotstuff publishes an 8-hour display rate but transfers funding
-            # hourly. Normalize it to the actual next hourly payment rate.
-            rate = (
-                raw_eight_hour_rate / 8
-                if raw_eight_hour_rate is not None
-                else None
-            )
-            observed = utc_now()
-            next_funding = observed.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            raw_hourly_rate = self.as_float(raw_rate_value)
+            # Hotstuff's product UI discusses an 8-hour display rate, but the
+            # public ticker field already matches the hourly rate used by exact
+            # funding-payment records. Treating it as an 8-hour value would
+            # divide the actual payment rate twice.
+            rate = raw_hourly_rate
+            next_funding = _strict_next_utc_hour(collection_observed)
             snapshots.append(
                 MarketSnapshot(
                     venue=self.venue,
                     symbol=symbol,
                     underlying=instrument.underlying,
+                    observed_at=collection_observed,
                     bid=self.as_float(item.get("best_bid") or item.get("bid")),
                     ask=self.as_float(item.get("best_ask") or item.get("ask")),
                     mark_price=self.as_float(item.get("mark_price") or item.get("markPrice")),
@@ -684,6 +809,12 @@ class HotstuffAdapter(VenueAdapter):
                     funding_rate=rate,
                     funding_interval_hours=1,
                     next_funding_at=next_funding,
+                    source_observed_at=_source_datetime(item.get("timestamp")),
+                    target_source="schedule",
+                    raw_funding_rate=raw_hourly_rate,
+                    raw_rate_unit="decimal",
+                    source_tenor_hours=1,
+                    transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(item.get("open_interest")),
                     volume_24h=self.as_float(item.get("volume_24h")),
                 )
@@ -694,6 +825,7 @@ class HotstuffAdapter(VenueAdapter):
                         venue=self.venue,
                         symbol=symbol,
                         underlying=instrument.underlying,
+                        observed_at=collection_observed,
                         effective_at=next_funding,
                         rate=rate,
                         interval_hours=1,
@@ -947,22 +1079,39 @@ class OrderlyAdapter(VenueAdapter):
         }
         snapshots: list[MarketSnapshot] = []
         current: list[FundingRate] = []
+        collection_observed = utc_now()
         for symbol, instrument in instrument_map.items():
             market = futures_map.get(symbol, {})
             funding = funding_map.get(symbol, {})
-            rate = self.as_float(
+            rate_value = (
                 funding.get("est_funding_rate")
-                or funding.get("estFundingRate")
-                or market.get("est_funding_rate")
+                if "est_funding_rate" in funding
+                else funding.get("estFundingRate")
             )
-            next_funding = _millis(
-                funding.get("next_funding_time") or funding.get("nextFundingTime")
+            if rate_value is None:
+                rate_value = market.get("est_funding_rate")
+            rate = self.as_float(rate_value)
+            target_value = (
+                funding.get("next_funding_time")
+                if "next_funding_time" in funding
+                else funding.get("nextFundingTime")
             )
+            api_target = _future_target(_millis(target_value), collection_observed)
+            if api_target is not None:
+                next_funding = api_target
+                target_source = "api"
+            else:
+                next_funding = _next_utc_funding_boundary(
+                    collection_observed,
+                    instrument.funding_interval_hours,
+                )
+                target_source = "schedule"
             snapshots.append(
                 MarketSnapshot(
                     venue=self.venue,
                     symbol=symbol,
                     underlying=instrument.underlying,
+                    observed_at=collection_observed,
                     bid=self.as_float(market.get("bid")),
                     ask=self.as_float(market.get("ask")),
                     mark_price=self.as_float(market.get("mark_price")),
@@ -970,16 +1119,25 @@ class OrderlyAdapter(VenueAdapter):
                     funding_rate=rate,
                     funding_interval_hours=instrument.funding_interval_hours,
                     next_funding_at=next_funding,
+                    source_observed_at=_source_datetime(
+                        funding.get("updated_time") or funding.get("timestamp")
+                    ),
+                    target_source=target_source,
+                    raw_funding_rate=rate,
+                    raw_rate_unit="decimal",
+                    source_tenor_hours=instrument.funding_interval_hours,
+                    transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(market.get("open_interest")),
                     volume_24h=self.as_float(market.get("24h_amount") or market.get("volume_24h")),
                 )
             )
-            if rate is not None and next_funding:
+            if rate is not None:
                 current.append(
                     FundingRate(
                         venue=self.venue,
                         symbol=symbol,
                         underlying=instrument.underlying,
+                        observed_at=collection_observed,
                         effective_at=next_funding,
                         rate=rate,
                         interval_hours=instrument.funding_interval_hours,
@@ -995,11 +1153,15 @@ class OrderlyAdapter(VenueAdapter):
         return AdapterResult(instruments=instruments, snapshots=snapshots, funding=current + history)
 
     async def _history(self, instrument: Instrument, since: datetime) -> list[FundingRate]:
+        # Include up to one maximum supported settlement interval before the
+        # requested window so the first in-window row has a predecessor from
+        # which its actual tenor can be inferred.
+        request_since = since - timedelta(hours=max(_SUPPORTED_FUNDING_INTERVALS))
         response = await self.client.get(
             f"{self.base_url}/v1/public/funding_rate_history",
             params={
                 "symbol": instrument.symbol,
-                "start_t": int(since.timestamp() * 1000),
+                "start_t": int(request_since.timestamp() * 1000),
                 "end_t": int(utc_now().timestamp() * 1000),
                 "page": 1,
                 "size": 500,
@@ -1015,7 +1177,7 @@ class OrderlyAdapter(VenueAdapter):
         if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
             raise RuntimeError("Unexpected Orderly funding history schema")
         observed = utc_now()
-        result: list[FundingRate] = []
+        timeline: list[tuple[datetime, float | None]] = []
         for item in data["rows"]:
             if not isinstance(item, dict):
                 continue
@@ -1030,8 +1192,26 @@ class OrderlyAdapter(VenueAdapter):
                 else item.get("fundingRate")
             )
             effective = _millis(effective_value)
-            rate = self.as_float(rate_value)
-            if not effective or rate is None:
+            if effective is None:
+                continue
+            timeline.append((effective, self.as_float(rate_value)))
+        timeline.sort(key=lambda row: row[0])
+
+        result: list[FundingRate] = []
+        previous_effective: datetime | None = None
+        for effective, rate in timeline:
+            if previous_effective is None:
+                previous_effective = effective
+                continue
+            elapsed_hours = (effective - previous_effective).total_seconds() / 3600
+            previous_effective = effective
+            interval_hours = _canonical_funding_interval(elapsed_hours)
+            if (
+                effective < since
+                or rate is None
+                or not math.isfinite(rate)
+                or interval_hours is None
+            ):
                 continue
             result.append(
                 FundingRate(
@@ -1041,7 +1221,7 @@ class OrderlyAdapter(VenueAdapter):
                     observed_at=observed,
                     effective_at=effective,
                     rate=rate,
-                    interval_hours=instrument.funding_interval_hours,
+                    interval_hours=interval_hours,
                     kind="settled",
                 )
             )

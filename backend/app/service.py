@@ -11,14 +11,25 @@ import httpx
 from .adapters.base import VenueAdapter
 from .analytics import MIN_STABILITY_SAMPLE_HOURS, build_carry_opportunities
 from .config import Settings
-from .models import DashboardResponse, DashboardSummary, Instrument, VenueStatus
+from .models import (
+    DashboardResponse,
+    DashboardSummary,
+    Instrument,
+    PredictionCollectorStatusResponse,
+    VenueStatus,
+)
+from .prediction import MinutePredictionCollector
 from .storage import CarryStore
 
 
 logger = logging.getLogger(__name__)
 HISTORY_REFRESH_INTERVAL = timedelta(hours=1)
 HISTORY_FAILURE_RETRY_INTERVAL = timedelta(minutes=2)
+HISTORY_WRITE_BATCH_SIZE = 1_000
 HistoryKey = tuple[str, str]
+PREDICTION_VENUES = frozenset({"lighter", "extended", "xyz", "hotstuff", "orderly"})
+ARCHIVE_MAINTENANCE_INTERVAL_SECONDS = 24 * 60 * 60
+PREDICTION_FLUSH_INTERVAL_SECONDS = 1
 
 
 class CarryService:
@@ -34,49 +45,177 @@ class CarryService:
             timeout=httpx.Timeout(config.request_timeout_seconds),
             headers={"User-Agent": "equity-carry-monitor/0.1"},
         )
-        self.adapters = [factory(self.client, config.underlyings) for factory in adapter_factories]
+        self.adapters = [
+            factory(self.client, config.underlyings) for factory in adapter_factories
+        ]
         self._task: asyncio.Task | None = None
+        self._prediction_refresh_task: asyncio.Task | None = None
+        self._prediction_flush_task: asyncio.Task | None = None
+        self._prediction_maintenance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._history_refreshed_at: dict[str, datetime] = {}
         self._history_next_attempt_at: dict[HistoryKey, datetime] = {}
         self._history_failures: dict[HistoryKey, str] = {}
-        self._refresh_lock = asyncio.Lock()
+        self._background_history_tasks: dict[str, asyncio.Task] = {}
+        self._general_refresh_lock = asyncio.Lock()
+        self._prediction_refresh_lock = asyncio.Lock()
+        self.prediction_collector = (
+            MinutePredictionCollector(
+                store,
+                status_window_minutes=config.prediction_status_window_minutes,
+            )
+            if config.prediction_collection_enabled
+            else None
+        )
+        self._last_archive_checked_at: datetime | None = None
+        self._last_archive_error: str | None = None
 
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._refresh_loop(), name="carry-refresh-loop")
+        if self._prediction_refresh_task is None:
+            self._prediction_refresh_task = asyncio.create_task(
+                self._prediction_refresh_loop(),
+                name="prediction-live-refresh-loop",
+            )
+        if (
+            self.prediction_collector is not None
+            and self._prediction_maintenance_task is None
+        ):
+            self._prediction_flush_task = asyncio.create_task(
+                self._prediction_flush_loop(),
+                name="prediction-minute-flush",
+            )
+            self._prediction_maintenance_task = asyncio.create_task(
+                self._prediction_maintenance_loop(),
+                name="prediction-archive-maintenance",
+            )
 
     async def stop(self) -> None:
         self._stop_event.set()
-        if self._task:
-            self._task.cancel()
+        tasks = [
+            task
+            for task in (
+                self._task,
+                self._prediction_refresh_task,
+                self._prediction_flush_task,
+                self._prediction_maintenance_task,
+                *self._background_history_tasks.values(),
+            )
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
         await self.client.aclose()
 
     async def _refresh_loop(self) -> None:
+        await self._run_refresh_loop(prediction_group=False)
+
+    async def _prediction_refresh_loop(self) -> None:
+        await self._run_refresh_loop(prediction_group=True)
+
+    async def _run_refresh_loop(self, *, prediction_group: bool) -> None:
         while not self._stop_event.is_set():
+            started = time.monotonic()
             try:
-                await self.refresh_once()
+                await self._refresh_group(prediction_group=prediction_group)
             except Exception:
-                logger.exception("refresh loop failed")
+                group = "prediction" if prediction_group else "general"
+                logger.exception("%s refresh loop failed", group)
+            remaining = max(
+                0.0,
+                self.config.refresh_seconds - (time.monotonic() - started),
+            )
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self.config.refresh_seconds
+                    self._stop_event.wait(), timeout=remaining
+                )
+            except TimeoutError:
+                continue
+
+    async def _prediction_flush_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if self.prediction_collector is not None:
+                try:
+                    self.prediction_collector.flush_completed(
+                        datetime.now(timezone.utc)
+                    )
+                except Exception:
+                    logger.exception("prediction minute flush failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=PREDICTION_FLUSH_INTERVAL_SECONDS,
                 )
             except TimeoutError:
                 continue
 
     async def refresh_once(self) -> None:
-        if self._refresh_lock.locked():
+        await asyncio.gather(
+            self._refresh_group(prediction_group=False),
+            self._refresh_group(prediction_group=True),
+        )
+        if self.prediction_collector is not None:
+            try:
+                self.prediction_collector.flush_completed(datetime.now(timezone.utc))
+            except Exception:
+                logger.exception("prediction minute flush failed")
+
+    async def _refresh_group(self, *, prediction_group: bool) -> None:
+        lock = (
+            self._prediction_refresh_lock
+            if prediction_group
+            else self._general_refresh_lock
+        )
+        if lock.locked():
             return
-        async with self._refresh_lock:
+        adapters = [
+            adapter
+            for adapter in self.adapters
+            if (adapter.venue in PREDICTION_VENUES) == prediction_group
+        ]
+        async with lock:
             await asyncio.gather(
-                *(self._refresh_adapter(adapter) for adapter in self.adapters),
+                *(self._refresh_adapter(adapter) for adapter in adapters),
                 return_exceptions=True,
             )
+
+    async def _prediction_maintenance_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                archive_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self.store.archive_old_prediction_months,
+                        datetime.now(timezone.utc),
+                        self.config.prediction_hot_days,
+                        self.config.prediction_archive_dir,
+                    )
+                )
+                try:
+                    await asyncio.shield(archive_task)
+                except asyncio.CancelledError:
+                    await archive_task
+                    raise
+                self._last_archive_checked_at = datetime.now(timezone.utc)
+                self._last_archive_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._last_archive_checked_at = datetime.now(timezone.utc)
+                self._last_archive_error = f"{type(exc).__name__}: {exc}"[:500]
+                logger.exception("prediction archive maintenance failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=ARCHIVE_MAINTENANCE_INTERVAL_SECONDS,
+                )
+            except TimeoutError:
+                continue
 
     async def _refresh_adapter(self, adapter: VenueAdapter) -> None:
         if adapter.venue not in self.config.venues:
@@ -95,19 +234,54 @@ class CarryService:
             self.store.sync_instruments(adapter.venue, result.instruments)
             self.store.upsert_snapshots(result.snapshots)
             self.store.upsert_funding(result.funding)
+            if (
+                self.prediction_collector is not None
+                and adapter.venue in PREDICTION_VENUES
+            ):
+                try:
+                    self.prediction_collector.ingest(
+                        adapter.venue,
+                        result.snapshots,
+                        expected_symbols=len(result.instruments),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "%s prediction collection failed: %s", adapter.venue, exc
+                    )
+                    self._record_prediction_failure(
+                        adapter.venue,
+                        f"{type(exc).__name__}: {exc}"[:500],
+                        expected_symbols=len(result.instruments),
+                    )
             history_error: str | None = None
             if uses_per_symbol_history:
-                try:
-                    history_error = await self._refresh_per_symbol_history(
+                if adapter.venue in PREDICTION_VENUES:
+                    history_error = self._history_failure_summary(
+                        adapter,
+                        result.instruments,
+                    )
+                    self._schedule_background_history(
                         adapter,
                         result.instruments,
                         history_since,
                         now,
                     )
-                except Exception as exc:
-                    logger.warning("%s history refresh failed: %s", adapter.venue, exc)
-                    error_text = f"{type(exc).__name__}: {exc}".rstrip()
-                    history_error = f"Partial history: batch failed ({error_text[:200]})"
+                else:
+                    try:
+                        history_error = await self._refresh_per_symbol_history(
+                            adapter,
+                            result.instruments,
+                            history_since,
+                            now,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "%s history refresh failed: %s", adapter.venue, exc
+                        )
+                        error_text = f"{type(exc).__name__}: {exc}".rstrip()
+                        history_error = (
+                            f"Partial history: batch failed ({error_text[:200]})"
+                        )
             elif include_history:
                 self._history_refreshed_at[adapter.venue] = datetime.now(timezone.utc)
 
@@ -130,6 +304,14 @@ class CarryService:
         except Exception as exc:
             logger.warning("%s refresh failed: %s", adapter.venue, exc)
             error_text = f"{type(exc).__name__}: {exc}".rstrip()
+            if (
+                self.prediction_collector is not None
+                and adapter.venue in PREDICTION_VENUES
+            ):
+                self._record_prediction_failure(
+                    adapter.venue,
+                    error_text[:500],
+                )
             self.store.upsert_status(
                 VenueStatus(
                     venue=adapter.venue,
@@ -138,6 +320,77 @@ class CarryService:
                     latency_ms=(time.perf_counter() - started) * 1000,
                 )
             )
+
+    def _record_prediction_failure(
+        self,
+        venue: str,
+        error: str,
+        expected_symbols: int = 0,
+    ) -> None:
+        if self.prediction_collector is None:
+            return
+        try:
+            self.prediction_collector.note_failure(
+                venue,
+                error,
+                expected_symbols=expected_symbols,
+            )
+        except Exception:
+            logger.exception("%s prediction status update failed", venue)
+
+    def _schedule_background_history(
+        self,
+        adapter: VenueAdapter,
+        instruments: list[Instrument],
+        history_since: datetime,
+        now: datetime,
+    ) -> None:
+        existing = self._background_history_tasks.get(adapter.venue)
+        if existing is not None and not existing.done():
+            return
+        self._background_history_tasks[adapter.venue] = asyncio.create_task(
+            self._run_background_history(
+                adapter,
+                list(instruments),
+                history_since,
+                now,
+            ),
+            name=f"{adapter.venue}-funding-history",
+        )
+
+    async def _run_background_history(
+        self,
+        adapter: VenueAdapter,
+        instruments: list[Instrument],
+        history_since: datetime,
+        now: datetime,
+    ) -> None:
+        try:
+            await self._refresh_per_symbol_history(
+                adapter,
+                instruments,
+                history_since,
+                now,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s background history refresh failed", adapter.venue)
+
+    def prediction_collector_status(self) -> PredictionCollectorStatusResponse:
+        stored = self.store.get_prediction_collector_status()
+        return PredictionCollectorStatusResponse(
+            generated_at=datetime.now(timezone.utc),
+            enabled=self.prediction_collector is not None,
+            poll_seconds=self.config.refresh_seconds,
+            sample_resolution_seconds=60,
+            status_window_minutes=self.config.prediction_status_window_minutes,
+            hot_retention_days=self.config.prediction_hot_days,
+            archive_dir=str(self.config.prediction_archive_dir),
+            last_archive_checked_at=self._last_archive_checked_at,
+            last_archive_error=self._last_archive_error,
+            **stored,
+        )
 
     async def _refresh_per_symbol_history(
         self,
@@ -173,7 +426,11 @@ class CarryService:
             batch_error: str | None = None
             try:
                 batch = await adapter.collect_history(due, history_since)
-                self.store.upsert_funding(batch.funding)
+                for offset in range(0, len(batch.funding), HISTORY_WRITE_BATCH_SIZE):
+                    self.store.upsert_funding(
+                        batch.funding[offset : offset + HISTORY_WRITE_BATCH_SIZE]
+                    )
+                    await asyncio.sleep(0)
             except Exception as exc:
                 batch_error = f"{type(exc).__name__}: {exc}".rstrip()[:240]
                 batch = None
@@ -212,6 +469,17 @@ class CarryService:
                 )
                 self._history_failures[key] = "no outcome returned"
 
+        return self._history_failure_summary(adapter, instruments)
+
+    def _history_failure_summary(
+        self,
+        adapter: VenueAdapter,
+        instruments: list[Instrument],
+    ) -> str | None:
+        active_keys = {
+            (adapter.venue, instrument.symbol)
+            for instrument in adapter.history_instruments(instruments)
+        }
         failures = sorted(
             (
                 symbol,

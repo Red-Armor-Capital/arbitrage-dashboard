@@ -13,11 +13,19 @@ from backend.app.adapters.dex import (
     LighterAdapter,
     OrderlyAdapter,
     XyzAdapter,
+    _seconds,
 )
 from backend.app.models import Instrument
 
 
 HISTORY_SINCE = datetime(2026, 7, 1, tzinfo=timezone.utc)
+COLLECTION_TIME = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
+
+
+def test_seconds_parses_epoch_and_rejects_invalid_values() -> None:
+    assert _seconds(1_783_764_000) == COLLECTION_TIME
+    assert _seconds("not-a-timestamp") is None
+    assert _seconds(0) is None
 
 
 async def _collect(
@@ -30,7 +38,10 @@ async def _collect(
 
 
 @pytest.mark.asyncio
-async def test_lighter_discovers_reviewed_stock_and_uses_one_bulk_details_call() -> None:
+async def test_lighter_discovers_reviewed_stock_and_uses_one_bulk_details_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -94,7 +105,17 @@ async def test_lighter_discovers_reviewed_stock_and_uses_one_bulk_details_call()
     assert instrument.metadata["asset_class"] == "stock"
     assert instrument.metadata["spot_carry_eligible"] is True
     assert result.snapshots[0].mark_price == pytest.approx(33.25)
-    assert result.snapshots[0].funding_rate == pytest.approx(0.0001)
+    snapshot = result.snapshots[0]
+    assert snapshot.funding_rate == pytest.approx(0.0001)
+    assert snapshot.next_funding_at == datetime(
+        2026, 7, 11, 11, tzinfo=timezone.utc
+    )
+    assert result.funding[0].effective_at == snapshot.next_funding_at
+    assert snapshot.target_source == "schedule"
+    assert snapshot.raw_funding_rate == pytest.approx(0.01)
+    assert snapshot.raw_rate_unit == "percent"
+    assert snapshot.source_tenor_hours == 1
+    assert snapshot.transform_version == "percent-to-decimal-v1"
 
     details_requests = [
         request
@@ -109,7 +130,66 @@ async def test_lighter_discovers_reviewed_stock_and_uses_one_bulk_details_call()
 
 
 @pytest.mark.asyncio
-async def test_extended_discovers_all_active_visible_tradfi_equities() -> None:
+async def test_lighter_preserves_raw_normalized_eight_hour_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/orderBooks":
+            return httpx.Response(
+                200,
+                json={
+                    "order_books": [
+                        {"symbol": "INTC", "market_id": 7, "status": "active"}
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/funding-rates":
+            return httpx.Response(
+                200,
+                json={
+                    "funding_rates": [
+                        {"exchange": "lighter", "market_id": 7, "rate": "0.0008"}
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/orderBookDetails":
+            return httpx.Response(
+                200,
+                json={
+                    "order_book_details": [
+                        {
+                            "symbol": "INTC",
+                            "market_id": 7,
+                            "funding_rate": "9.9",
+                            "funding_timestamp": 1_784_000_000,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    result = await _collect(LighterAdapter, handler)
+
+    snapshot = result.snapshots[0]
+    assert snapshot.funding_rate == pytest.approx(0.0001)
+    assert snapshot.raw_funding_rate == pytest.approx(0.0008)
+    assert snapshot.raw_rate_unit == "decimal"
+    assert snapshot.source_tenor_hours == 8
+    assert snapshot.transform_version == "eight-hour-to-hourly-v1"
+    assert snapshot.next_funding_at == datetime(
+        2026, 7, 11, 11, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_extended_discovers_all_active_visible_tradfi_equities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+    api_target = COLLECTION_TIME + timedelta(minutes=30)
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/info/markets"
         return httpx.Response(
@@ -127,7 +207,7 @@ async def test_extended_discovers_all_active_visible_tradfi_equities() -> None:
                             "markPrice": "34.1",
                             "indexPrice": "34.0",
                             "fundingRate": "0.0002",
-                            "nextFundingTime": 1_784_000_000_000,
+                            "nextFundingTime": int(api_target.timestamp() * 1000),
                         },
                     },
                     {
@@ -155,7 +235,53 @@ async def test_extended_discovers_all_active_visible_tradfi_equities() -> None:
     assert [item.underlying for item in result.instruments] == ["INTC"]
     assert result.instruments[0].metadata["asset_class"] == "stock"
     assert result.instruments[0].metadata["spot_carry_eligible"] is True
-    assert result.snapshots[0].funding_rate == pytest.approx(0.0002)
+    snapshot = result.snapshots[0]
+    assert snapshot.funding_rate == pytest.approx(0.0002)
+    assert snapshot.next_funding_at == api_target
+    assert snapshot.target_source == "api"
+    assert snapshot.raw_funding_rate == pytest.approx(0.0002)
+    assert snapshot.raw_rate_unit == "decimal"
+    assert snapshot.source_tenor_hours == 1
+    assert snapshot.transform_version == "identity-v1"
+
+
+@pytest.mark.asyncio
+async def test_extended_rejects_non_future_api_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/info/markets"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "name": "INTC-USD",
+                        "uiName": "INTC",
+                        "category": "TradFi",
+                        "subCategory": "Equity",
+                        "visibleOnUi": True,
+                        "status": "ACTIVE",
+                        "marketStats": {
+                            "fundingRate": "0",
+                            "nextFundingRate": int(COLLECTION_TIME.timestamp() * 1000),
+                        },
+                    }
+                ]
+            },
+        )
+
+    result = await _collect(ExtendedAdapter, handler)
+
+    snapshot = result.snapshots[0]
+    assert snapshot.funding_rate == 0
+    assert snapshot.next_funding_at == datetime(
+        2026, 7, 11, 11, tzinfo=timezone.utc
+    )
+    assert snapshot.target_source == "schedule"
+    assert result.funding[0].effective_at == snapshot.next_funding_at
 
 
 @pytest.mark.asyncio
@@ -239,7 +365,10 @@ def _xyz_handler(categories: list[list[str]]):
 
 
 @pytest.mark.asyncio
-async def test_xyz_uses_stock_category_and_canonicalizes_skhx_alias() -> None:
+async def test_xyz_uses_stock_category_and_canonicalizes_skhx_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
     result = await _collect(
         XyzAdapter,
         _xyz_handler([["xyz:SKHX", "stocks"], ["xyz:BTC", "crypto"]]),
@@ -253,6 +382,14 @@ async def test_xyz_uses_stock_category_and_canonicalizes_skhx_alias() -> None:
     assert instrument.metadata["growth_mode"] is True
     assert instrument.maker_fee == pytest.approx(0.00003)
     assert instrument.taker_fee == pytest.approx(0.00009)
+    snapshot = result.snapshots[0]
+    assert snapshot.next_funding_at == datetime(
+        2026, 7, 11, 11, tzinfo=timezone.utc
+    )
+    assert snapshot.target_source == "schedule"
+    assert snapshot.raw_funding_rate == pytest.approx(0.0003)
+    assert snapshot.source_tenor_hours == 1
+    assert result.funding[0].effective_at == snapshot.next_funding_at
 
 
 @pytest.mark.asyncio
@@ -267,7 +404,11 @@ async def test_xyz_fails_closed_when_stock_category_is_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hotstuff_uses_price_index_and_excludes_delisted_instruments() -> None:
+async def test_hotstuff_uses_price_index_and_excludes_delisted_instruments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if body["method"] == "instruments":
@@ -325,8 +466,21 @@ async def test_hotstuff_uses_price_index_and_excludes_delisted_instruments() -> 
     assert result.instruments[0].metadata["spot_carry_eligible"] is False
     assert result.instruments[1].metadata["asset_class"] == "index"
     assert result.instruments[1].metadata["spot_carry_eligible"] is False
-    assert result.snapshots[0].funding_rate == pytest.approx(0.0004 / 8)
-    assert result.funding[0].rate == pytest.approx(0.0004 / 8)
+    assert result.instruments[0].metadata["current_rate_tenor_hours"] == 1
+    assert (
+        result.instruments[0].metadata["ticker_rate_semantics"]
+        == "hourly_payment_rate"
+    )
+    snapshot = result.snapshots[0]
+    assert snapshot.funding_rate == pytest.approx(0.0004)
+    assert snapshot.raw_funding_rate == pytest.approx(0.0004)
+    assert snapshot.raw_rate_unit == "decimal"
+    assert snapshot.source_tenor_hours == 1
+    assert snapshot.transform_version == "identity-v1"
+    assert snapshot.next_funding_at == datetime(
+        2026, 7, 11, 11, tzinfo=timezone.utc
+    )
+    assert result.funding[0].rate == pytest.approx(0.0004)
     assert result.funding[0].interval_hours == 1
 
 
@@ -430,7 +584,11 @@ async def test_hotstuff_discards_conflicting_settled_rates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto() -> None:
+async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+    api_target = COLLECTION_TIME + timedelta(minutes=30)
     info_rows = [
         {
             "symbol": "PERP_NVDA_USDC",
@@ -497,7 +655,7 @@ async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto() -
                             {
                                 "symbol": symbol,
                                 "est_funding_rate": "0.0002",
-                                "next_funding_time": 1_784_000_000_000,
+                                "next_funding_time": int(api_target.timestamp() * 1000),
                             }
                             for symbol in included_symbols
                         ]
@@ -520,3 +678,166 @@ async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto() -
     )
     assert len(result.snapshots) == 2
     assert len(result.funding) == 2
+    assert all(item.next_funding_at == api_target for item in result.snapshots)
+    assert all(item.target_source == "api" for item in result.snapshots)
+    assert all(item.raw_funding_rate == pytest.approx(0.0002) for item in result.snapshots)
+    assert all(item.source_tenor_hours == 1 for item in result.snapshots)
+
+
+@pytest.mark.asyncio
+async def test_orderly_derives_strict_standard_utc_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+    definitions = [
+        ("PERP_NVDA_USDC", "NVDA", None, 1),
+        ("PERP_GOOGL_USDC", "GOOGL", None, 2),
+        ("PERP_TSLA_USDC", "TSLA", None, 4),
+        ("PERP_AAPL_USDC", "AAPL", "mythos", 8),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/public/info":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "rows": [
+                            {
+                                "symbol": symbol,
+                                "display_symbol_name": display,
+                                "broker_id": broker,
+                                "status": "ACTIVE",
+                                "funding_period": interval * 3_600_000,
+                            }
+                            for symbol, display, broker, interval in definitions
+                        ]
+                    }
+                },
+            )
+        if request.url.path == "/v1/public/futures":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "rows": [
+                            {"symbol": symbol, "mark_price": "100"}
+                            for symbol, _, _, _ in definitions
+                        ]
+                    }
+                },
+            )
+        if request.url.path == "/v1/public/funding_rates":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "rows": [
+                            {
+                                "symbol": symbol,
+                                "est_funding_rate": "0",
+                                "next_funding_time": int(
+                                    COLLECTION_TIME.timestamp() * 1000
+                                ),
+                            }
+                            for symbol, _, _, _ in definitions
+                        ]
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    result = await _collect(OrderlyAdapter, handler)
+
+    expected = {
+        "PERP_NVDA_USDC": datetime(2026, 7, 11, 11, tzinfo=timezone.utc),
+        "PERP_GOOGL_USDC": datetime(2026, 7, 11, 12, tzinfo=timezone.utc),
+        "PERP_TSLA_USDC": datetime(2026, 7, 11, 12, tzinfo=timezone.utc),
+        "PERP_AAPL_USDC": datetime(2026, 7, 11, 16, tzinfo=timezone.utc),
+    }
+    assert {item.symbol: item.next_funding_at for item in result.snapshots} == expected
+    assert all(item.target_source == "schedule" for item in result.snapshots)
+    assert all(item.raw_funding_rate == 0 for item in result.snapshots)
+    assert {item.symbol: item.effective_at for item in result.funding} == expected
+
+
+@pytest.mark.asyncio
+async def test_orderly_history_infers_supported_transitions_and_skips_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history_now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: history_now)
+    since = datetime(2026, 7, 10, 8, tzinfo=timezone.utc)
+
+    def ms(value: datetime) -> int:
+        return int(value.timestamp() * 1000)
+
+    rows = [
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 11, 7, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.005",
+        },
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 10, 22, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.004",
+        },
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 10, 7, 0, 30, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.000",
+        },
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 10, 14, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.003",
+        },
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 10, 8, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.001",
+        },
+        {
+            "funding_rate_timestamp": ms(
+                datetime(2026, 7, 10, 10, tzinfo=timezone.utc)
+            ),
+            "funding_rate": "0.002",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/public/funding_rate_history"
+        assert int(request.url.params["start_t"]) == ms(
+            since - timedelta(hours=8)
+        )
+        assert request.url.params["size"] == "500"
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"rows": rows}},
+        )
+
+    instrument = Instrument(
+        venue="orderly",
+        symbol="PERP_NVDA_USDC",
+        underlying="NVDA",
+        funding_interval_hours=1,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        history = await OrderlyAdapter(client, set())._history(instrument, since)
+
+    assert [item.effective_at for item in history] == [
+        datetime(2026, 7, 10, 8, tzinfo=timezone.utc),
+        datetime(2026, 7, 10, 10, tzinfo=timezone.utc),
+        datetime(2026, 7, 10, 14, tzinfo=timezone.utc),
+        datetime(2026, 7, 10, 22, tzinfo=timezone.utc),
+    ]
+    assert [item.interval_hours for item in history] == [1, 2, 4, 8]
+    assert [item.rate for item in history] == pytest.approx(
+        [0.001, 0.002, 0.003, 0.004]
+    )

@@ -374,6 +374,8 @@ button {
 .compactField select:focus-visible,
 .refreshButton:focus-visible,
 .sortDirectionButton:focus-visible,
+.dexOption:focus-within,
+.dexFilterActions button:focus-visible,
 .tableScroll:focus-visible {
   outline: 2px solid rgba(82, 226, 164, 0.72);
   outline-offset: 2px;
@@ -392,6 +394,122 @@ button {
 
 .toggleLabel input {
   accent-color: var(--green-2);
+}
+
+.dexFilterBar {
+  display: grid;
+  grid-template-columns: minmax(180px, auto) minmax(420px, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
+  min-width: 0;
+  margin: 0;
+  padding: 13px 20px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: rgba(82, 226, 164, 0.025);
+}
+
+.dexFilterIntro strong,
+.dexFilterIntro small {
+  display: block;
+}
+
+.dexFilterIntro strong {
+  margin-bottom: 4px;
+  color: #d8e9e0;
+  font-size: 12px;
+}
+
+.dexFilterIntro small,
+.dexFilterNote {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.dexOptionList,
+.dexFilterActions {
+  display: flex;
+  align-items: center;
+}
+
+.dexOptionList {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.dexOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.018);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.dexOption:hover {
+  border-color: rgba(82, 226, 164, 0.35);
+}
+
+.dexOption.isSelected {
+  border-color: rgba(82, 226, 164, 0.32);
+  color: #dff5e9;
+  background: rgba(82, 226, 164, 0.075);
+}
+
+.dexOption input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--green-2);
+}
+
+.dexOption small {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.dexFilterActions {
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dexFilterActions span {
+  margin-right: 3px;
+  color: var(--green);
+  font: 550 10px/1 var(--font-geist-mono), monospace;
+}
+
+.dexFilterActions button {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.dexFilterActions button:hover:not(:disabled) {
+  border-color: rgba(82, 226, 164, 0.4);
+  color: var(--text);
+}
+
+.dexFilterActions button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.dexFilterNote {
+  grid-column: 2 / -1;
+  margin: -4px 0 0;
 }
 
 .errorBanner {
@@ -783,6 +901,19 @@ footer {
     flex-wrap: wrap;
   }
 
+  .dexFilterBar {
+    grid-template-columns: minmax(180px, auto) 1fr;
+  }
+
+  .dexFilterActions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .dexFilterNote {
+    grid-column: 1 / -1;
+  }
+
   .statusGrid {
     margin-top: 18px;
     grid-template-columns: repeat(3, minmax(130px, 1fr));
@@ -831,6 +962,22 @@ footer {
 
   .assumptionBanner strong {
     margin-bottom: 5px;
+  }
+
+  .dexFilterBar {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
+  .dexOptionList,
+  .dexFilterActions,
+  .dexFilterNote {
+    grid-column: 1;
+  }
+
+  .dexOption {
+    flex: 1 1 calc(50% - 7px);
+    min-height: 42px;
   }
 
   .metricGrid,
