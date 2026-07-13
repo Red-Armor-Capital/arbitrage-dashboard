@@ -63,6 +63,58 @@ def test_store_round_trip(tmp_path) -> None:
     assert store.get_statuses()[0]["status"] == "healthy"
 
 
+def test_stock_quote_is_separate_from_perpetual_rows(tmp_path) -> None:
+    store = CarryStore(tmp_path / "carry.duckdb")
+    now = datetime.now(timezone.utc)
+    store.upsert_instruments(
+        [
+            Instrument(
+                venue="us_equity",
+                symbol="BB",
+                underlying="BB",
+                product_type="stock",
+                metadata={
+                    "quote_source": "Nasdaq delayed",
+                    "provider_symbol": "BB",
+                    "quote_session": "closed",
+                    "quote_delayed": True,
+                },
+            )
+        ]
+    )
+    store.upsert_snapshots(
+        [
+            MarketSnapshot(
+                venue="us_equity",
+                symbol="BB",
+                underlying="BB",
+                observed_at=now,
+                mark_price=10.97,
+                index_price=10.97,
+            )
+        ]
+    )
+
+    assert store.get_current_rows() == []
+    assert store.get_spot_rows() == [
+        {
+            "venue": "us_equity",
+            "symbol": "BB",
+            "underlying": "BB",
+            "observed_at": now,
+            "bid": None,
+            "ask": None,
+            "mark_price": 10.97,
+            "index_price": 10.97,
+            "display_name": None,
+            "quote_source": "Nasdaq delayed",
+            "provider_symbol": "BB",
+            "quote_session": "closed",
+            "quote_delayed": True,
+        }
+    ]
+
+
 def test_instrument_sync_deactivates_only_missing_symbols(tmp_path) -> None:
     store = CarryStore(tmp_path / "carry.duckdb")
     now = datetime.now(timezone.utc)

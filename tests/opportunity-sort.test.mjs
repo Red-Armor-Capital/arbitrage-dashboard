@@ -7,7 +7,7 @@ function opportunity(underlying, overrides = {}) {
   return {
     underlying,
     strategy_type: "spot_perp",
-    long_venue: "synthetic_spot",
+    long_venue: "us_equity",
     long_symbol: `${underlying}-SPOT-ASSUMED`,
     short_venue: "lighter",
     short_symbol: underlying,

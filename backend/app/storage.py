@@ -489,6 +489,35 @@ class CarryStore:
             results.append(result)
         return results
 
+    def get_spot_rows(self) -> list[dict]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.venue, m.symbol, i.underlying, m.observed_at,
+                    m.bid, m.ask, m.mark_price, m.index_price,
+                    i.display_name, i.metadata_json
+                FROM current_market m
+                JOIN instruments i USING (venue, symbol)
+                WHERE i.active = TRUE
+                  AND i.product_type IN ('spot', 'stock')
+                """
+            ).fetchall()
+        keys = [
+            "venue", "symbol", "underlying", "observed_at", "bid", "ask",
+            "mark_price", "index_price", "display_name", "metadata_json",
+        ]
+        results: list[dict] = []
+        for row in rows:
+            result = dict(zip(keys, row, strict=True))
+            metadata = self._parse_metadata(result.pop("metadata_json"))
+            result["quote_source"] = metadata.get("quote_source")
+            result["provider_symbol"] = metadata.get("provider_symbol")
+            result["quote_session"] = metadata.get("quote_session")
+            result["quote_delayed"] = metadata.get("quote_delayed") is True
+            results.append(result)
+        return results
+
     @staticmethod
     def _parse_metadata(raw: object) -> dict:
         if not isinstance(raw, str):

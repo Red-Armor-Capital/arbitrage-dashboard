@@ -1,6 +1,6 @@
 # Equity Carry Monitor
 
-美股永续跨平台资金费 Carry 与合成现货—链上永续 Carry 实时看板。项目只做行情采集、已结算资金费归档和研究统计；不包含自动下单。
+美股永续跨平台资金费 Carry 与美股现货—链上永续 Carry 实时看板。项目只做行情采集、已结算资金费归档和研究统计；不包含自动下单。
 
 ## 当前能力
 
@@ -9,10 +9,10 @@
 - 将五个 DEX 的有效预测快照按 UTC 分钟聚合为 OHLC，保留原始单位、原始 tenor、目标结算时刻、价格和转换版本；不对缺失分钟做前值填充。
 - 分钟数据在 DuckDB 中至少保留 90 天，完整旧月份经校验后归档为永久 ZSTD Parquet。
 - 将已结算资金费写入 DuckDB，按共同小时窗口比较两个平台；历史回填按标的独立跟踪，失败标的单独重试。
-- 对正资金费链上永续生成“多合成现货、空永续”研究候选；现货价格明确假设为与该永续 mark/index 同价，Funding 为 0。
+- 对正资金费链上永续生成“多美股现货、空永续”研究候选，并展示公开美股报价与永续 mark/index 的折溢价。
 - 展示当前预测 Carry、7 日已结算均值、年化波动率、正 Carry 占比、往返 taker 费和手续费回本时间。
 - 当前预测年化、7 日已结算均值、年化波动率和正 Carry 占比支持表头升降序排序。
-- 可按用户实际拥有账户的 DEX 多选过滤机会，并在浏览器本地保存选择；合成现货腿不受 DEX 账户筛选影响。
+- 可按用户实际拥有账户的 DEX 多选过滤机会，并在浏览器本地保存选择；美股现货腿不受 DEX 账户筛选影响。
 - 预测值与已结算值严格分离；不足 24 小时重叠样本的组合不会标为“稳定”。
 - 对跨平台价格偏差超过 10% 的组合做安全过滤，避免把合约乘数或错误 symbol mapping 当成套利。
 
@@ -53,6 +53,8 @@ npm run dev
 - `CARRY_ENABLED_VENUES`：启用的数据源。
 - `CARRY_CORE_UNDERLYINGS`：CEX 适配器关注的股票代码；DEX 股票目录由平台分类或复核目录发现。
 - `CARRY_REFRESH_SECONDS`：实时刷新间隔。
+- `CARRY_US_EQUITY_REFRESH_SECONDS`：公开美股行情刷新间隔，默认 60 秒。
+- `CARRY_US_EQUITY_BATCH_SIZE`：每轮美股报价批量大小，默认 4；BB 与 SK Hynix 每轮优先刷新。
 - `CARRY_HISTORY_LOOKBACK_DAYS`：统计窗口。
 - `CARRY_DATABASE_PATH`：DuckDB 路径。
 - `CARRY_PREDICTION_COLLECTION_ENABLED`：是否启用五个 DEX 的分钟预测采集，仓库默认关闭；需要长期采集的实例应显式设为 `true`。
@@ -71,27 +73,30 @@ hourly_carry = short_funding / short_interval - long_funding / long_interval
 simple_apr = hourly_carry × 24 × 365
 ```
 
-合成现货—链上永续只在永续当前资金费为正时生成：
+美股现货—链上永续只在永续当前资金费为正、且存在明确美股映射和有效报价时生成：
 
 ```text
-synthetic_spot_price = perp_mark_or_index_price
-synthetic_spot_funding = 0
+comparable_us_spot = us_spot_price × spot_units_per_perp_unit
+contract_basis = (perp_mark_or_index / comparable_us_spot - 1) × 100
+us_spot_funding = 0
 hourly_carry = short_perp_funding / short_perp_interval
 simple_apr = hourly_carry × 24 × 365
 ```
+
+BB 等同股同单位合约按 1:1 比较。SK Hynix 的 1 份 SKHY ADS 代表 0.1 普通股，因此 `SKHYNIXUSD` / `SKHX` 与美股比较时使用 `10 × SKHY`；Lighter 的 SK Hynix 产品为 KRW 表现的 quanto 参考，界面会单独标注，折溢价不代表可交割收敛。
 
 其中：
 
 - `当前预测年化` 使用各平台当前/预计下一期 funding，只用于发现机会，会在结算前变化。
 - 永续—永续的 `7D 已结算均值`、波动率和正 Carry 占比只使用双方实际已结算历史的重叠小时。
-- 合成现货—永续的历史统计只使用空头永续的实际已结算 funding，合成现货 funding 始终视为 0；不会用当前预测伪造历史。
+- 美股现货—永续的历史统计只使用空头永续的实际已结算 funding，美股现货 funding 始终视为 0；不会用当前预测伪造历史。
 - Hotstuff 产品页面会展示 8 小时口径，但公开 ticker API 的 `funding_rate` 已是实际小时支付率，本项目按 1 小时 decimal 原值使用；历史统计使用公开账户的精确已结算 Funding 支付记录，并对重复或冲突记录做安全校验。
 - 离散结算的 N 小时资金费会向前展开到其覆盖的 N 个小时，避免把上一期结算率泄漏到下一期。
 - `往返手续费 = 2 × (多头平台 taker 费 + 空头平台 taker 费)`，即两边开仓和两边平仓。
-- 合成现货—永续目前仅计 `2 × 空头永续 taker 费`；由于没有真实券商腿，现货佣金、融资/现金机会成本、滑点、税费、过夜费用和基差均暂按 0，并在 API/UI 中标为假设口径。
+- 美股现货—永续目前仅计 `2 × 空头永续 taker 费`；现货佣金、融资/现金机会成本、滑点、税费和过夜费用尚未计入。
 - `手续费回本` 优先使用已结算均值；没有历史时可显示按当前预测得到的估计，并明确标注。
 
-当前版本尚未计入滑点、盘口深度、稳定币/桥风险、保证金占用、清算风险、税费、券商融资利息、过夜类持仓费和 API 行情授权成本。合成现货不是 Moomoo、IBKR 或 Schwab 的真实报价，不能直接视为可成交套利。
+当前版本尚未计入滑点、盘口深度、稳定币/桥风险、保证金占用、清算风险、税费、券商融资利息、过夜类持仓费和 API 行情授权成本。美股价格来自 best-effort 公开行情（Nasdaq 页面行情，失败时回退 Yahoo chart），不是券商可成交 NBBO；界面会展示来源、时段和延迟状态，不能直接视为可成交套利。
 
 ## 数据与 API
 

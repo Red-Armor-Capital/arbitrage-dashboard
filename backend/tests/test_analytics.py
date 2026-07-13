@@ -28,6 +28,24 @@ def _current(venue: str, symbol: str, rate: float, fee: float) -> dict:
     }
 
 
+def _spot(symbol: str, price: float, observed_at: datetime | None = None) -> dict:
+    return {
+        "venue": "us_equity",
+        "symbol": symbol,
+        "underlying": symbol,
+        "observed_at": observed_at or datetime.now(timezone.utc),
+        "bid": None,
+        "ask": None,
+        "mark_price": price,
+        "index_price": price,
+        "display_name": symbol,
+        "quote_source": "test quote",
+        "provider_symbol": symbol,
+        "quote_session": "regular",
+        "quote_delayed": False,
+    }
+
+
 def test_builds_short_high_long_low_and_breakeven() -> None:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     current = [
@@ -105,7 +123,7 @@ def test_rejects_large_cross_venue_price_mismatch() -> None:
     assert [row for row in rows if row.strategy_type == "perp_perp"] == []
 
 
-def test_builds_synthetic_spot_chain_perp_from_single_perp_history() -> None:
+def test_builds_us_spot_chain_perp_from_single_perp_history() -> None:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     current = [_current("xyz", "xyz:NVDA", 0.00002, 0.00009)]
     settled = [
@@ -120,21 +138,26 @@ def test_builds_synthetic_spot_chain_perp_from_single_perp_history() -> None:
         for offset in range(1, 25)
     ]
 
-    rows = build_carry_opportunities(current, settled, lookback_days=7)
+    rows = build_carry_opportunities(
+        current, settled, lookback_days=7, spot_rows=[_spot("NVDA", 100.0)]
+    )
 
     assert len(rows) == 1
     row = rows[0]
     assert row.strategy_type == "spot_perp"
-    assert row.price_assumption == "spot_equals_perp"
+    assert row.price_assumption == "us_spot_quote"
     assert row.fee_scope == "perp_leg_only"
-    assert row.long_venue == "synthetic_spot"
+    assert row.long_venue == "us_equity"
     assert row.long_symbol == "NVDA"
     assert row.short_venue == "xyz"
     assert row.current_carry_apr == pytest.approx(0.00002 * HOURS_PER_YEAR * 100)
     assert row.mean_carry_apr == pytest.approx(0.00002 * HOURS_PER_YEAR * 100)
     assert row.long_funding_apr == 0
     assert row.short_funding_apr == pytest.approx(0.00002 * HOURS_PER_YEAR * 100)
-    assert row.cross_basis_pct == 0
+    assert row.spot_price_usd == 100
+    assert row.spot_equivalent_price_usd == 100
+    assert row.perp_price_usd == pytest.approx(100.05)
+    assert row.spot_perp_basis_pct == pytest.approx(0.05)
     assert row.sample_hours == 24
     assert row.history_quality == "sufficient"
     assert row.positive_ratio == 1
@@ -175,7 +198,9 @@ def test_synthetic_spot_requires_explicit_stock_or_etf_eligibility(
     row["asset_class"] = asset_class
     row["spot_carry_eligible"] = eligible
 
-    assert build_carry_opportunities([row], [], lookback_days=7) == []
+    assert build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("NVDA", 100)]
+    ) == []
 
 
 def test_synthetic_spot_accepts_an_explicitly_eligible_etf() -> None:
@@ -183,7 +208,54 @@ def test_synthetic_spot_accepts_an_explicitly_eligible_etf() -> None:
     row["underlying"] = "SPY"
     row["asset_class"] = "etf"
 
-    opportunities = build_carry_opportunities([row], [], lookback_days=7)
+    opportunities = build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("SPY", 100)]
+    )
 
     assert len(opportunities) == 1
     assert opportunities[0].asset_class == "etf"
+
+
+def test_skhynix_uses_ten_ads_and_keeps_large_real_basis() -> None:
+    row = _current("lighter", "SKHYNIXUSD", 0.00002, 0.00009)
+    row.update(
+        underlying="SKHYNIX",
+        display_name="SK Hynix",
+        mark_price=1280.0,
+        index_price=1279.0,
+    )
+
+    opportunities = build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("SKHY", 160.0)]
+    )
+
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity.spot_symbol == "SKHY"
+    assert opportunity.spot_units_per_perp_unit == 10
+    assert opportunity.spot_equivalent_price_usd == 1600
+    assert opportunity.perp_price_usd == 1280
+    assert opportunity.spot_perp_basis_pct == pytest.approx(-20)
+    assert "quanto" in (opportunity.price_comparison_note or "")
+
+
+def test_bb_uses_one_to_one_us_share_price() -> None:
+    row = _current("xyz", "xyz:BB", 0.00002, 0.00009)
+    row.update(underlying="BB", mark_price=11.5, index_price=11.4)
+
+    opportunities = build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("BB", 10.0)]
+    )
+
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity.spot_units_per_perp_unit == 1
+    assert opportunity.spot_equivalent_price_usd == 10
+    assert opportunity.spot_perp_basis_pct == pytest.approx(15)
+
+
+def test_spot_perp_requires_an_observed_us_spot_quote() -> None:
+    row = _current("xyz", "xyz:BB", 0.00002, 0.00009)
+    row["underlying"] = "BB"
+
+    assert build_carry_opportunities([row], [], lookback_days=7) == []

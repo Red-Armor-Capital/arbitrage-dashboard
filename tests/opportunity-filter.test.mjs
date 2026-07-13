@@ -16,8 +16,8 @@ function opportunity(longVenue, shortVenue) {
   };
 }
 
-test("synthetic spot does not require an additional DEX account", () => {
-  const item = opportunity("synthetic_spot", "lighter");
+test("US spot does not require an additional DEX account", () => {
+  const item = opportunity("us_equity", "lighter");
 
   assert.deepEqual(requiredDexVenues(item), ["lighter"]);
   assert.equal(matchesDexSelection(item, new Set(["lighter"])), true);
