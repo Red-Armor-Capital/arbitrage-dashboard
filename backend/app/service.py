@@ -20,6 +20,7 @@ from .models import (
 )
 from .prediction import MinutePredictionCollector
 from .storage import CarryStore
+from .us_equity import US_EQUITY_VENUE, collect_us_equity_quotes, get_us_spot_spec
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ class CarryService:
         )
         self._last_archive_checked_at: datetime | None = None
         self._last_archive_error: str | None = None
+        self._last_us_equity_refresh_at: datetime | None = None
+        self._us_equity_offset = 0
 
     async def start(self) -> None:
         if self._task is None:
@@ -183,6 +186,85 @@ class CarryService:
             await asyncio.gather(
                 *(self._refresh_adapter(adapter) for adapter in adapters),
                 return_exceptions=True,
+            )
+            if prediction_group:
+                await self._refresh_us_equity_quotes()
+
+    async def _refresh_us_equity_quotes(self) -> None:
+        if US_EQUITY_VENUE not in self.config.venues:
+            return
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_us_equity_refresh_at is not None
+            and (now - self._last_us_equity_refresh_at).total_seconds()
+            < self.config.us_equity_refresh_seconds
+        ):
+            return
+
+        available_underlyings = {
+            str(row["underlying"]).upper()
+            for row in self.store.get_current_rows()
+            if row.get("venue") in PREDICTION_VENUES
+            and get_us_spot_spec(str(row["underlying"])) is not None
+        }
+        if not available_underlyings:
+            return
+
+        priority = [
+            underlying
+            for underlying in ("BB", "SKHYNIX")
+            if underlying in available_underlyings
+        ]
+        rotating = sorted(available_underlyings - set(priority))
+        rotating_slots = max(0, self.config.us_equity_batch_size - len(priority))
+        if rotating and rotating_slots:
+            start = self._us_equity_offset % len(rotating)
+            selected = [
+                rotating[(start + offset) % len(rotating)]
+                for offset in range(min(rotating_slots, len(rotating)))
+            ]
+            self._us_equity_offset = (start + len(selected)) % len(rotating)
+        else:
+            selected = []
+        underlyings = set(priority + selected)
+
+        started = time.perf_counter()
+        try:
+            collection = await collect_us_equity_quotes(self.client, underlyings)
+            result = collection.result
+            # Quotes are refreshed in rotating batches. Upsert the current batch
+            # without deactivating still-valid last-good quotes from other batches.
+            self.store.upsert_instruments(result.instruments)
+            self.store.upsert_snapshots(result.snapshots)
+            self._last_us_equity_refresh_at = datetime.now(timezone.utc)
+            errors = list(collection.errors)
+            if not result.snapshots:
+                errors.insert(0, "No live US equity quotes returned")
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=US_EQUITY_VENUE,
+                    status=(
+                        "healthy"
+                        if not errors
+                        else "degraded" if result.snapshots else "offline"
+                    ),
+                    last_success_at=(
+                        datetime.now(timezone.utc) if result.snapshots else None
+                    ),
+                    last_error="; ".join(errors)[:500] if errors else None,
+                    instruments=len(result.snapshots),
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            )
+        except Exception as exc:
+            logger.warning("US equity quote refresh failed: %s", exc)
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=US_EQUITY_VENUE,
+                    status="offline",
+                    last_error=f"{type(exc).__name__}: {exc}"[:500],
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
             )
 
     async def _prediction_maintenance_loop(self) -> None:
@@ -499,12 +581,14 @@ class CarryService:
 
     def dashboard(self) -> DashboardResponse:
         current = self.store.get_current_rows()
+        spot_rows = self.store.get_spot_rows()
         since = datetime.now(timezone.utc) - timedelta(days=self.config.history_lookback_days)
         settled = self.store.get_settled_funding(since)
         opportunities = build_carry_opportunities(
             current_rows=current,
             settled_rows=settled,
             lookback_days=self.config.history_lookback_days,
+            spot_rows=spot_rows,
         )
         statuses = [VenueStatus.model_validate(value) for value in self.store.get_statuses()]
         sufficiently_sampled = [

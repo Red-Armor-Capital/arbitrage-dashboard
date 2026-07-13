@@ -30,7 +30,7 @@ type Opportunity = {
   display_name: string | null;
   asset_class: "stock" | "etf" | "index" | "preipo" | "basket" | "unknown";
   strategy_type: "perp_perp" | "spot_perp";
-  price_assumption: "observed" | "spot_equals_perp";
+  price_assumption: "observed" | "spot_equals_perp" | "us_spot_quote";
   fee_scope: "both_legs" | "perp_leg_only";
   long_venue: string;
   long_symbol: string;
@@ -49,6 +49,19 @@ type Opportunity = {
   long_funding_apr: number;
   short_funding_apr: number;
   cross_basis_pct: number | null;
+  spot_symbol: string | null;
+  spot_price_usd: number | null;
+  spot_equivalent_price_usd: number | null;
+  spot_units_per_perp_unit: number | null;
+  perp_price_usd: number | null;
+  perp_price_kind: "mark" | "index" | null;
+  spot_perp_basis_pct: number | null;
+  spot_quote_source: string | null;
+  spot_quote_session: string | null;
+  spot_quote_delayed: boolean | null;
+  spot_observed_at: string | null;
+  perp_observed_at: string | null;
+  price_comparison_note: string | null;
   data_freshness_seconds: number | null;
   updated_at: string;
 };
@@ -94,7 +107,7 @@ const venueNames: Record<string, string> = {
   xyz: "trade[XYZ]",
   hotstuff: "Hotstuff",
   orderly: "Orderly",
-  synthetic_spot: "合成现货（假设）",
+  us_equity: "美股现货",
 };
 
 function venueLabel(value: string) {
@@ -105,6 +118,27 @@ function formatApr(value: number | null, digits = 1) {
   if (value === null || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(digits)}%`;
+}
+
+function formatUsd(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: value >= 1000 ? 2 : 2,
+    maximumFractionDigits: value >= 1000 ? 2 : 4,
+  }).format(value);
+}
+
+function quoteSessionLabel(value: string | null, delayed: boolean | null) {
+  const sessionNames: Record<string, string> = {
+    pre: "盘前",
+    regular: "盘中",
+    post: "盘后",
+    closed: "已收盘",
+  };
+  const session = sessionNames[(value ?? "").toLowerCase()] ?? value ?? "时段未知";
+  return delayed ? `${session} · 延迟/回退` : session;
 }
 
 function formatHours(value: number | null) {
@@ -385,14 +419,14 @@ export default function Home() {
           <p className="sectionLabel">实时资金费 CARRY</p>
           <h2>找到可覆盖交易成本的稳定 Carry</h2>
           <p className="heroCopy">
-            同时比较永续—永续资金费差与合成现货—链上永续的单边资金费。
+            同时比较永续—永续资金费差与美股现货—链上永续的单边资金费和折溢价。
             当前 Funding 仅作下一期指示；均值、波动率和胜率只使用已结算记录。
           </p>
         </div>
         <div className="methodNote">
           <span>当前口径</span>
           <strong>空正 Funding 永续 · 多对冲腿</strong>
-          <small>合成现货按永续同价、Funding 为 0</small>
+          <small>美股公开行情 · Funding 为 0</small>
         </div>
       </section>
 
@@ -463,7 +497,7 @@ export default function Home() {
                     }
                   >
                     <option value="all">全部</option>
-                    <option value="spot_perp">合成现货—永续</option>
+                    <option value="spot_perp">美股现货—永续</option>
                     <option value="perp_perp">永续—永续</option>
                   </select>
                 </label>
@@ -557,16 +591,16 @@ export default function Home() {
                 </button>
               </div>
               <p className="dexFilterNote">
-                Moomoo / IBKR 合成现货腿不受此筛选影响
+                美股现货腿不受此筛选影响
               </p>
             </fieldset>
 
             <div className="assumptionBanner">
-              <strong>合成现货口径</strong>
+              <strong>美股现货口径</strong>
               <span>
-                默认股票/ETF 可在 Moomoo 或 IBKR 建立现货腿，价格按对应链上永续 mark/index
-                同价、Funding 为 0；未接入真实券商行情，现货交易费、融资/机会成本、滑点、
-                税费、基差及平台额外过夜持仓费暂按 0。永续腿目前只计平台 taker 开平仓费。
+                现货价来自公开美股行情，按报价时间与时段标注；合约折溢价 = 合约 mark/index ÷
+                换算后美股价 − 1。海力士按 10 SKHY ADS = 1 普通股换算。该报价不是券商可成交
+                NBBO，现货交易费、融资/机会成本、滑点和税费仍未计入。
               </span>
             </div>
 
@@ -587,12 +621,13 @@ export default function Home() {
             >
               <table>
                 <caption className="srOnly">
-                  合成现货—链上永续与永续—永续 Carry 研究候选
+                  美股现货—链上永续与永续—永续 Carry 研究候选
                 </caption>
                 <thead>
                   <tr>
                     <th scope="col">标的</th>
                     <th scope="col">Carry 来源</th>
+                    <th scope="col">美股 / 合约</th>
                     <SortableHeader
                       label="当前预测年化"
                       sortKey="current"
@@ -658,7 +693,7 @@ export default function Home() {
                             }`}
                           >
                             {item.strategy_type === "spot_perp"
-                              ? "合成现货—永续 · 假设"
+                              ? "美股现货—永续"
                               : "永续—永续"}
                           </span>
                           <div className="venuePair">
@@ -672,9 +707,48 @@ export default function Home() {
                           </div>
                           <small className="symbolLine">
                             {item.strategy_type === "spot_perp"
-                              ? `${item.long_symbol} 同价假设 / ${item.short_symbol}`
+                              ? `${item.long_symbol} / ${item.short_symbol}`
                               : `${item.long_symbol} / ${item.short_symbol}`}
                           </small>
+                        </td>
+                        <td className="priceBasisCell">
+                          {item.strategy_type === "spot_perp" ? (
+                            <div className="priceBasisStack">
+                              <div>
+                                <span>{item.spot_symbol} 现货</span>
+                                <strong>{formatUsd(item.spot_price_usd)}</strong>
+                              </div>
+                              <div>
+                                <span>
+                                  {venueLabel(item.short_venue)} {item.perp_price_kind ?? "price"}
+                                </span>
+                                <strong>{formatUsd(item.perp_price_usd)}</strong>
+                              </div>
+                              {(item.spot_units_per_perp_unit ?? 1) !== 1 && (
+                                <small>
+                                  {item.spot_units_per_perp_unit} ADS = 1 合约标的 · 可比价 {formatUsd(item.spot_equivalent_price_usd)}
+                                </small>
+                              )}
+                              <span
+                                className={`basisPill ${
+                                  (item.spot_perp_basis_pct ?? 0) >= 0
+                                    ? "premium"
+                                    : "discount"
+                                }`}
+                              >
+                                {(item.spot_perp_basis_pct ?? 0) >= 0
+                                  ? "合约溢价"
+                                  : "合约折价"}{" "}
+                                {formatApr(Math.abs(item.spot_perp_basis_pct ?? 0), 2).replace("+", "")}
+                              </span>
+                              <small className="quoteMeta" title={item.price_comparison_note ?? undefined}>
+                                {item.spot_quote_source ?? "行情源未知"} · {quoteSessionLabel(item.spot_quote_session, item.spot_quote_delayed)}
+                                {item.price_comparison_note?.includes("quanto") ? " · KRW quanto 参考" : ""}
+                              </small>
+                            </div>
+                          ) : (
+                            <span className="notApplicable">—<small>仅现货—永续适用</small></span>
+                          )}
                         </td>
                         <td className="numberCell positiveValue">
                           {formatApr(item.current_carry_apr)}
@@ -779,7 +853,7 @@ export default function Home() {
                     ? "请至少勾选一个你可以交易的链上平台。"
                     : (data?.opportunities.length ?? 0) > 0
                       ? "请调整组合类型、最低年化、稳定性或搜索条件。"
-                      : "正资金费链上永续可生成合成现货组合；双永续组合需要同一标的出现在两个健康数据源。"}
+                      : "正资金费链上永续需先取得对应美股报价；双永续组合需要同一标的出现在两个健康数据源。"}
                 </span>
               </div>
             )}
@@ -815,7 +889,7 @@ export default function Home() {
       <footer>
         <span>Equity Carry Monitor · Research only</span>
         <span>
-          当前 Funding 会在结算前变化；合成现货不是实时券商报价，且未计现货成本、滑点、税费、稳定币和保证金风险。
+          当前 Funding 会在结算前变化；公开美股行情不是券商可成交 NBBO，且未计现货成本、滑点、税费、稳定币和保证金风险。
         </span>
       </footer>
     </main>

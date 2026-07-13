@@ -566,7 +566,7 @@ button {
 
 table {
   width: 100%;
-  min-width: 1180px;
+  min-width: 1400px;
   border-collapse: collapse;
 }
 
@@ -726,6 +726,72 @@ tbody tr:last-child td {
 .symbolLine {
   margin-top: 5px;
   font-family: var(--font-geist-mono), monospace;
+}
+
+.priceBasisCell {
+  min-width: 190px;
+  font-family: var(--font-geist-mono), monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.priceBasisStack {
+  display: grid;
+  gap: 5px;
+}
+
+.priceBasisStack > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.priceBasisStack > div span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.priceBasisStack > div strong {
+  color: #dce9e3;
+  font-size: 11px;
+}
+
+.priceBasisStack small {
+  color: var(--faint);
+  font-family: var(--font-geist-sans), sans-serif;
+  line-height: 1.35;
+}
+
+.basisPill {
+  justify-self: start;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font: 650 10px/1 var(--font-geist-mono), monospace;
+}
+
+.basisPill.premium {
+  color: #9ef0c8;
+  background: rgba(82, 226, 164, 0.085);
+  border: 1px solid rgba(82, 226, 164, 0.16);
+}
+
+.basisPill.discount {
+  color: #efc882;
+  background: rgba(245, 187, 103, 0.075);
+  border: 1px solid rgba(245, 187, 103, 0.16);
+}
+
+.quoteMeta {
+  max-width: 205px;
+}
+
+.notApplicable {
+  color: var(--faint);
+}
+
+.notApplicable small {
+  display: block;
+  margin-top: 5px;
 }
 
 .numberCell {

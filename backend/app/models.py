@@ -133,7 +133,7 @@ class CarryOpportunity(BaseModel):
     display_name: str | None = None
     asset_class: Literal["stock", "etf", "index", "preipo", "basket", "unknown"]
     strategy_type: Literal["perp_perp", "spot_perp"]
-    price_assumption: Literal["observed", "spot_equals_perp"]
+    price_assumption: Literal["observed", "spot_equals_perp", "us_spot_quote"]
     fee_scope: Literal["both_legs", "perp_leg_only"]
     long_venue: str
     long_symbol: str
@@ -152,6 +152,19 @@ class CarryOpportunity(BaseModel):
     long_funding_apr: float
     short_funding_apr: float
     cross_basis_pct: float | None = None
+    spot_symbol: str | None = None
+    spot_price_usd: float | None = None
+    spot_equivalent_price_usd: float | None = None
+    spot_units_per_perp_unit: float | None = None
+    perp_price_usd: float | None = None
+    perp_price_kind: Literal["mark", "index"] | None = None
+    spot_perp_basis_pct: float | None = None
+    spot_quote_source: str | None = None
+    spot_quote_session: str | None = None
+    spot_quote_delayed: bool | None = None
+    spot_observed_at: datetime | None = None
+    perp_observed_at: datetime | None = None
+    price_comparison_note: str | None = None
     data_freshness_seconds: float | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 

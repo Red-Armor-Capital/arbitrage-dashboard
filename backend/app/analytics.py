@@ -6,12 +6,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from .models import CarryOpportunity
+from .us_equity import US_EQUITY_VENUE, get_us_spot_spec
 
 
 HOURS_PER_YEAR = 24 * 365
 MIN_STABILITY_SAMPLE_HOURS = 24
 MAX_CROSS_BASIS_PCT = 10.0
-SYNTHETIC_SPOT_VENUE = "synthetic_spot"
 CHAIN_PERP_VENUES = frozenset({"lighter", "extended", "xyz", "hotstuff", "orderly"})
 ASSET_CLASSES = frozenset({"stock", "etf", "index", "preipo", "basket", "unknown"})
 
@@ -91,6 +91,7 @@ def build_carry_opportunities(
     current_rows: list[dict],
     settled_rows: list[dict],
     lookback_days: int,
+    spot_rows: list[dict] | None = None,
 ) -> list[CarryOpportunity]:
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=lookback_days)
@@ -105,22 +106,49 @@ def build_carry_opportunities(
         row["hourly_rate"] = float(rate) / interval
         by_underlying[row["underlying"]].append(row)
 
+    spots_by_symbol = {
+        str(row["symbol"]).upper(): row
+        for row in (spot_rows or [])
+        if row.get("venue") == US_EQUITY_VENUE
+    }
+
     opportunities: list[CarryOpportunity] = []
     for underlying, rows in by_underlying.items():
-        # Research-only spot/perp carry. There is no live broker quote yet: the
-        # synthetic spot leg is explicitly assumed to equal this chain perp's
-        # mark/index price and to have zero funding. Only positive-funding perps
-        # produce the long-spot / short-perp direction requested by the strategy.
+        # Spot/perp carry uses a real US-listed quote and an explicit contract
+        # unit mapping. Only positive-funding perps produce long-spot/short-perp.
         for short_row in rows:
             current_hourly = short_row["hourly_rate"]
             asset_class = _asset_class(short_row)
+            spot_spec = get_us_spot_spec(underlying)
+            spot_row = spots_by_symbol.get(spot_spec.ticker) if spot_spec else None
             if (
                 short_row["venue"] not in CHAIN_PERP_VENUES
                 or current_hourly <= 0
                 or short_row.get("spot_carry_eligible") is not True
                 or asset_class not in {"stock", "etf"}
+                or spot_spec is None
+                or spot_row is None
             ):
                 continue
+
+            spot_price_value = spot_row.get("mark_price") or spot_row.get("index_price")
+            if not spot_price_value or float(spot_price_value) <= 0:
+                continue
+            if short_row.get("mark_price") and float(short_row["mark_price"]) > 0:
+                perp_price = float(short_row["mark_price"])
+                perp_price_kind = "mark"
+            elif short_row.get("index_price") and float(short_row["index_price"]) > 0:
+                perp_price = float(short_row["index_price"])
+                perp_price_kind = "index"
+            else:
+                continue
+            spot_price = float(spot_price_value)
+            spot_equivalent = spot_price * spot_spec.spot_units_per_perp_unit
+            if spot_equivalent <= 0:
+                continue
+            # Contract-relative-to-US-spot basis. Positive means the contract is
+            # at a premium; negative means it is at a discount.
+            spot_perp_basis = (perp_price / spot_equivalent - 1) * 100
 
             short_hist = _hourly_series(
                 histories.get((short_row["venue"], short_row["symbol"]), {}), start, now
@@ -129,10 +157,23 @@ def build_carry_opportunities(
             mean_apr, volatility, positive_ratio, mean_hourly, history_quality = (
                 _historical_stats(carry_hourly)
             )
-            # The assumed spot leg has no configured broker, so its commissions,
-            # financing/opportunity cost, slippage and overnight fees remain out
-            # of scope. We still count opening and closing the perp at taker rates.
+            # The quote is an informational market-data reference, not a configured
+            # broker execution leg. Spot-side costs remain out of scope.
             round_trip_fee = 2 * float(short_row["taker_fee"] or 0)
+
+            spot_observed_at = spot_row["observed_at"]
+            perp_observed_at = short_row["observed_at"]
+            oldest = min(spot_observed_at, perp_observed_at)
+            comparison_note = None
+            if underlying == "SKHYNIX":
+                comparison_note = (
+                    "10 SKHY ADS = 1 SK Hynix common share; "
+                    + (
+                        "Lighter is a KRW-performance quanto reference"
+                        if short_row["venue"] == "lighter"
+                        else "contract unit compared with one common share"
+                    )
+                )
 
             opportunities.append(
                 CarryOpportunity(
@@ -140,10 +181,10 @@ def build_carry_opportunities(
                     display_name=short_row.get("display_name"),
                     asset_class=asset_class,
                     strategy_type="spot_perp",
-                    price_assumption="spot_equals_perp",
+                    price_assumption="us_spot_quote",
                     fee_scope="perp_leg_only",
-                    long_venue=SYNTHETIC_SPOT_VENUE,
-                    long_symbol=underlying,
+                    long_venue=US_EQUITY_VENUE,
+                    long_symbol=spot_spec.ticker,
                     short_venue=short_row["venue"],
                     short_symbol=short_row["symbol"],
                     current_carry_apr=current_hourly * HOURS_PER_YEAR * 100,
@@ -159,10 +200,20 @@ def build_carry_opportunities(
                     history_quality=history_quality,
                     long_funding_apr=0.0,
                     short_funding_apr=current_hourly * HOURS_PER_YEAR * 100,
-                    cross_basis_pct=0.0,
-                    data_freshness_seconds=_freshness_seconds(
-                        short_row["observed_at"], now
-                    ),
+                    spot_symbol=spot_spec.ticker,
+                    spot_price_usd=spot_price,
+                    spot_equivalent_price_usd=spot_equivalent,
+                    spot_units_per_perp_unit=spot_spec.spot_units_per_perp_unit,
+                    perp_price_usd=perp_price,
+                    perp_price_kind=perp_price_kind,
+                    spot_perp_basis_pct=spot_perp_basis,
+                    spot_quote_source=spot_row.get("quote_source"),
+                    spot_quote_session=spot_row.get("quote_session"),
+                    spot_quote_delayed=spot_row.get("quote_delayed") is True,
+                    spot_observed_at=spot_observed_at,
+                    perp_observed_at=perp_observed_at,
+                    price_comparison_note=comparison_note,
+                    data_freshness_seconds=_freshness_seconds(oldest, now),
                 )
             )
 
