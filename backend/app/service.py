@@ -109,6 +109,9 @@ class CarryService:
         self._history_next_attempt_at: dict[HistoryKey, datetime] = {}
         self._history_failures: dict[HistoryKey, str] = {}
         self._background_history_tasks: dict[str, asyncio.Task] = {}
+        self._history_venue_semaphore = asyncio.Semaphore(
+            max(1, config.history_venue_concurrency)
+        )
         self._general_refresh_lock = asyncio.Lock()
         self._prediction_refresh_lock = asyncio.Lock()
         self.prediction_collector = (
@@ -675,12 +678,13 @@ class CarryService:
         now: datetime,
     ) -> None:
         try:
-            await self._refresh_per_symbol_history(
-                adapter,
-                instruments,
-                history_since,
-                now,
-            )
+            async with self._history_venue_semaphore:
+                await self._refresh_per_symbol_history(
+                    adapter,
+                    instruments,
+                    history_since,
+                    now,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

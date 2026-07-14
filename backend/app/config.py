@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     database_path: Path = ROOT_DIR / "data" / "carry.duckdb"
     refresh_seconds: int = 30
     history_lookback_days: int = 7
+    history_venue_concurrency: int = 1
     request_timeout_seconds: float = 12.0
     us_equity_refresh_seconds: int = 60
     us_equity_batch_size: int = 12

@@ -80,6 +80,10 @@ class SlowHistoryPredictionAdapter(PredictionAdapter):
         return []
 
 
+class SecondSlowHistoryPredictionAdapter(SlowHistoryPredictionAdapter):
+    venue = "extended"
+
+
 class SlowGeneralAdapter(VenueAdapter):
     venue = "slow-general"
 
@@ -202,6 +206,54 @@ async def test_dex_history_backfill_does_not_block_live_refresh(tmp_path) -> Non
         adapter.history_release.set()
         await asyncio.wait_for(task, timeout=0.5)
     finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_dex_history_backfill_respects_global_venue_concurrency(tmp_path) -> None:
+    store = CarryStore(tmp_path / "carry.duckdb")
+    service = CarryService(
+        Settings(
+            database_path=tmp_path / "unused.duckdb",
+            enabled_venues="lighter,extended",
+            history_venue_concurrency=1,
+        ),
+        store,
+        [SlowHistoryPredictionAdapter, SecondSlowHistoryPredictionAdapter],
+    )
+    first, second = service.adapters
+    assert isinstance(first, SlowHistoryPredictionAdapter)
+    assert isinstance(second, SecondSlowHistoryPredictionAdapter)
+    now = datetime.now(UTC)
+    history_since = now - timedelta(days=7)
+
+    service._schedule_background_history(
+        first,
+        [Instrument(venue=first.venue, symbol="NVDA-USD", underlying="NVDA")],
+        history_since,
+        now,
+    )
+    try:
+        await asyncio.wait_for(first.history_started.wait(), timeout=0.5)
+        service._schedule_background_history(
+            second,
+            [Instrument(venue=second.venue, symbol="NVDA-USD", underlying="NVDA")],
+            history_since,
+            now,
+        )
+        await asyncio.sleep(0)
+        assert second.history_started.is_set() is False
+
+        first.history_release.set()
+        await asyncio.wait_for(second.history_started.wait(), timeout=0.5)
+        second.history_release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*service._background_history_tasks.values()),
+            timeout=0.5,
+        )
+    finally:
+        first.history_release.set()
+        second.history_release.set()
         await service.stop()
 
 
