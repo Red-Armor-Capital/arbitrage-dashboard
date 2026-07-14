@@ -53,6 +53,7 @@ def test_history_backfill_defaults_to_one_venue_at_a_time() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.history_venue_concurrency == 1
+    assert settings.history_symbol_concurrency == 2
 
 
 def test_production_cors_allows_only_the_exact_frontend_origin() -> None:

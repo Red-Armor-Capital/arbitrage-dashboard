@@ -17,6 +17,8 @@ services:
         value: "60"
       - key: CARRY_HISTORY_VENUE_CONCURRENCY
         value: "1"
+      - key: CARRY_HISTORY_SYMBOL_CONCURRENCY
+        value: "2"
       - key: CARRY_US_EQUITY_REFRESH_SECONDS
         value: "60"
       - key: CARRY_ENABLED_VENUES

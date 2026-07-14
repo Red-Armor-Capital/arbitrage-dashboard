@@ -100,6 +100,12 @@ class CarryService:
         self.adapters = [
             factory(self.client, config.underlyings) for factory in adapter_factories
         ]
+        history_symbol_concurrency = max(1, config.history_symbol_concurrency)
+        for adapter in self.adapters:
+            adapter.history_concurrency = min(
+                max(1, adapter.history_concurrency),
+                history_symbol_concurrency,
+            )
         self._task: asyncio.Task | None = None
         self._prediction_refresh_task: asyncio.Task | None = None
         self._prediction_flush_task: asyncio.Task | None = None

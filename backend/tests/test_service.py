@@ -121,6 +121,25 @@ class ConcurrencyAdapter(PerSymbolAdapter):
             self.active_history_requests -= 1
 
 
+@pytest.mark.asyncio
+async def test_service_caps_history_concurrency_per_adapter_instance(tmp_path) -> None:
+    service = CarryService(
+        Settings(
+            _env_file=None,
+            database_path=tmp_path / "carry.duckdb",
+            history_symbol_concurrency=2,
+        ),
+        CarryStore(tmp_path / "store.duckdb"),
+        [PerSymbolAdapter],
+    )
+
+    try:
+        assert service.adapters[0].history_concurrency == 2
+        assert PerSymbolAdapter.history_concurrency == 8
+    finally:
+        await service.stop()
+
+
 def test_dashboard_row_filters_fail_closed_for_offline_and_stale_sources() -> None:
     now = datetime.now(timezone.utc)
     statuses = [
