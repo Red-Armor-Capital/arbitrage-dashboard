@@ -5,6 +5,7 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from .kr_equity import KR_EQUITY_VENUE, get_kr_spot_spec
 from .models import CarryOpportunity, PerpLiquiditySnapshot
 from .us_equity import US_EQUITY_VENUE, get_us_spot_spec
 
@@ -132,10 +133,10 @@ def build_carry_opportunities(
         row["hourly_rate"] = float(rate) / interval
         by_underlying[row["underlying"]].append(row)
 
-    spots_by_symbol = {
-        str(row["symbol"]).upper(): row
+    spots_by_key = {
+        (str(row["venue"]), str(row["symbol"]).upper()): row
         for row in (spot_rows or [])
-        if row.get("venue") == US_EQUITY_VENUE
+        if row.get("venue") in {US_EQUITY_VENUE, KR_EQUITY_VENUE}
     }
 
     opportunities: list[CarryOpportunity] = []
@@ -145,8 +146,15 @@ def build_carry_opportunities(
         for short_row in rows:
             current_hourly = short_row["hourly_rate"]
             asset_class = _asset_class(short_row)
-            spot_spec = get_us_spot_spec(underlying)
-            spot_row = spots_by_symbol.get(spot_spec.ticker) if spot_spec else None
+            kr_spot_spec = get_kr_spot_spec(underlying)
+            us_spot_spec = get_us_spot_spec(underlying)
+            spot_spec = kr_spot_spec or us_spot_spec
+            spot_venue = KR_EQUITY_VENUE if kr_spot_spec else US_EQUITY_VENUE
+            spot_row = (
+                spots_by_key.get((spot_venue, spot_spec.ticker))
+                if spot_spec
+                else None
+            )
             if (
                 short_row["venue"] not in CHAIN_PERP_VENUES
                 or current_hourly <= 0
@@ -191,15 +199,18 @@ def build_carry_opportunities(
             perp_observed_at = short_row["observed_at"]
             oldest = min(spot_observed_at, perp_observed_at)
             comparison_note = None
-            if underlying == "SKHYNIX":
+            if spot_venue == KR_EQUITY_VENUE:
                 comparison_note = (
-                    "10 SKHY ADS = 1 SK Hynix common share; "
+                    "KRX 000660.KS common share converted from KRW using USD/KRW; "
                     + (
                         "Lighter is a KRW-performance quanto reference"
                         if short_row["venue"] == "lighter"
-                        else "contract unit compared with one common share"
+                        else "contract unit compared 1:1 with one common share"
                     )
+                    + "; FX is a Hana Bank notice reference, not executable FX"
                 )
+            elif underlying == "SKHY":
+                comparison_note = "SKHY US-listed ADS compared 1:1 with xyz:SKHY"
 
             opportunities.append(
                 CarryOpportunity(
@@ -207,9 +218,13 @@ def build_carry_opportunities(
                     display_name=short_row.get("display_name"),
                     asset_class=asset_class,
                     strategy_type="spot_perp",
-                    price_assumption="us_spot_quote",
+                    price_assumption=(
+                        "kr_spot_quote"
+                        if spot_venue == KR_EQUITY_VENUE
+                        else "us_spot_quote"
+                    ),
                     fee_scope="perp_leg_only",
-                    long_venue=US_EQUITY_VENUE,
+                    long_venue=spot_venue,
                     long_symbol=spot_spec.ticker,
                     short_venue=short_row["venue"],
                     short_symbol=short_row["symbol"],
@@ -227,7 +242,15 @@ def build_carry_opportunities(
                     long_funding_apr=0.0,
                     short_funding_apr=current_hourly * HOURS_PER_YEAR * 100,
                     short_liquidity=_perp_liquidity(short_row),
+                    spot_market=spot_row.get("spot_market"),
                     spot_symbol=spot_spec.ticker,
+                    spot_price_local=_nonnegative_float(
+                        spot_row.get("local_price")
+                    ),
+                    spot_currency=spot_row.get("local_currency"),
+                    spot_local_per_usd=_nonnegative_float(
+                        spot_row.get("local_per_usd")
+                    ),
                     spot_price_usd=spot_price,
                     spot_equivalent_price_usd=spot_equivalent,
                     spot_units_per_perp_unit=spot_spec.spot_units_per_perp_unit,

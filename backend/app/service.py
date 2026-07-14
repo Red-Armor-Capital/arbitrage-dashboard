@@ -11,6 +11,11 @@ import httpx
 from .adapters.base import VenueAdapter
 from .analytics import MIN_STABILITY_SAMPLE_HOURS, build_carry_opportunities
 from .config import Settings
+from .kr_equity import (
+    KR_EQUITY_VENUE,
+    collect_kr_equity_quotes,
+    get_kr_spot_spec,
+)
 from .models import (
     DashboardResponse,
     DashboardSummary,
@@ -71,6 +76,7 @@ class CarryService:
         self._last_archive_checked_at: datetime | None = None
         self._last_archive_error: str | None = None
         self._last_us_equity_refresh_at: datetime | None = None
+        self._last_kr_equity_refresh_at: datetime | None = None
         self._us_equity_offset = 0
 
     async def start(self) -> None:
@@ -188,7 +194,10 @@ class CarryService:
                 return_exceptions=True,
             )
             if prediction_group:
-                await self._refresh_us_equity_quotes()
+                await asyncio.gather(
+                    self._refresh_us_equity_quotes(),
+                    self._refresh_kr_equity_quotes(),
+                )
 
     async def _refresh_us_equity_quotes(self) -> None:
         if US_EQUITY_VENUE not in self.config.venues:
@@ -212,7 +221,7 @@ class CarryService:
 
         priority = [
             underlying
-            for underlying in ("BB", "SKHYNIX")
+            for underlying in ("BB", "SKHY")
             if underlying in available_underlyings
         ]
         rotating = sorted(available_underlyings - set(priority))
@@ -267,6 +276,62 @@ class CarryService:
                 )
             )
 
+    async def _refresh_kr_equity_quotes(self) -> None:
+        if KR_EQUITY_VENUE not in self.config.venues:
+            return
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_kr_equity_refresh_at is not None
+            and (now - self._last_kr_equity_refresh_at).total_seconds()
+            < self.config.us_equity_refresh_seconds
+        ):
+            return
+
+        underlyings = {
+            str(row["underlying"]).upper()
+            for row in self.store.get_current_rows()
+            if row.get("venue") in PREDICTION_VENUES
+            and get_kr_spot_spec(str(row["underlying"])) is not None
+        }
+        if not underlyings:
+            return
+
+        started = time.perf_counter()
+        try:
+            collection = await collect_kr_equity_quotes(self.client, underlyings)
+            result = collection.result
+            self.store.upsert_instruments(result.instruments)
+            self.store.upsert_snapshots(result.snapshots)
+            self._last_kr_equity_refresh_at = datetime.now(timezone.utc)
+            errors = list(collection.errors)
+            if not result.snapshots:
+                errors.insert(0, "No live Korean equity quotes returned")
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=KR_EQUITY_VENUE,
+                    status=(
+                        "healthy"
+                        if not errors
+                        else "degraded" if result.snapshots else "offline"
+                    ),
+                    last_success_at=(
+                        datetime.now(timezone.utc) if result.snapshots else None
+                    ),
+                    last_error="; ".join(errors)[:500] if errors else None,
+                    instruments=len(result.snapshots),
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Korean equity quote refresh failed: %s", exc)
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=KR_EQUITY_VENUE,
+                    status="offline",
+                    last_error=f"{type(exc).__name__}: {exc}"[:500],
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            )
     async def _prediction_maintenance_loop(self) -> None:
         while not self._stop_event.is_set():
             try:

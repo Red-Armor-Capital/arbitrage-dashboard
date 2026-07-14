@@ -28,11 +28,22 @@ def _current(venue: str, symbol: str, rate: float, fee: float) -> dict:
     }
 
 
-def _spot(symbol: str, price: float, observed_at: datetime | None = None) -> dict:
+def _spot(
+    symbol: str,
+    price: float,
+    observed_at: datetime | None = None,
+    *,
+    venue: str = "us_equity",
+    underlying: str | None = None,
+    market: str = "US",
+    local_price: float | None = None,
+    currency: str = "USD",
+    local_per_usd: float = 1.0,
+) -> dict:
     return {
-        "venue": "us_equity",
+        "venue": venue,
         "symbol": symbol,
-        "underlying": symbol,
+        "underlying": underlying or symbol,
         "observed_at": observed_at or datetime.now(timezone.utc),
         "bid": None,
         "ask": None,
@@ -43,6 +54,10 @@ def _spot(symbol: str, price: float, observed_at: datetime | None = None) -> dic
         "provider_symbol": symbol,
         "quote_session": "regular",
         "quote_delayed": False,
+        "spot_market": market,
+        "local_price": local_price if local_price is not None else price,
+        "local_currency": currency,
+        "local_per_usd": local_per_usd,
     }
 
 
@@ -225,9 +240,9 @@ def test_synthetic_spot_accepts_an_explicitly_eligible_etf() -> None:
     assert opportunities[0].asset_class == "etf"
 
 
-def test_skhynix_uses_ten_ads_and_keeps_large_real_basis() -> None:
-    row = _current("lighter", "SKHYNIXUSD", 0.00002, 0.00009)
-    row.update(
+def test_skhynix_uses_korean_common_share_and_krw_conversion() -> None:
+    korean_perp = _current("lighter", "SKHYNIXUSD", 0.00002, 0.00009)
+    korean_perp.update(
         underlying="SKHYNIX",
         display_name="SK Hynix",
         mark_price=1280.0,
@@ -235,17 +250,89 @@ def test_skhynix_uses_ten_ads_and_keeps_large_real_basis() -> None:
     )
 
     opportunities = build_carry_opportunities(
-        [row], [], lookback_days=7, spot_rows=[_spot("SKHY", 160.0)]
+        [korean_perp],
+        [],
+        lookback_days=7,
+        spot_rows=[
+            _spot(
+                "000660.KS",
+                1_919_000 / 1495.8,
+                venue="kr_equity",
+                underlying="SKHYNIX",
+                market="KR",
+                local_price=1_919_000,
+                currency="KRW",
+                local_per_usd=1495.8,
+            ),
+            _spot("SKHY", 160.0, underlying="SKHY"),
+        ],
     )
 
     assert len(opportunities) == 1
     opportunity = opportunities[0]
-    assert opportunity.spot_symbol == "SKHY"
-    assert opportunity.spot_units_per_perp_unit == 10
-    assert opportunity.spot_equivalent_price_usd == 1600
+    assert opportunity.long_venue == "kr_equity"
+    assert opportunity.spot_market == "KR"
+    assert opportunity.spot_symbol == "000660.KS"
+    assert opportunity.spot_units_per_perp_unit == 1
+    assert opportunity.spot_price_local == 1_919_000
+    assert opportunity.spot_currency == "KRW"
+    assert opportunity.spot_local_per_usd == pytest.approx(1495.8)
+    assert opportunity.spot_equivalent_price_usd == pytest.approx(1_919_000 / 1495.8)
     assert opportunity.perp_price_usd == 1280
-    assert opportunity.spot_perp_basis_pct == pytest.approx(-20)
+    assert opportunity.spot_perp_basis_pct == pytest.approx(
+        (1280 / (1_919_000 / 1495.8) - 1) * 100
+    )
     assert "quanto" in (opportunity.price_comparison_note or "")
+
+
+def test_skhynix_ads_contract_uses_us_ads_one_to_one() -> None:
+    ads_perp = _current("xyz", "xyz:SKHY", 0.00002, 0.00009)
+    ads_perp.update(
+        underlying="SKHY",
+        display_name="SK Hynix ADS",
+        mark_price=163.0,
+        index_price=162.9,
+    )
+
+    opportunities = build_carry_opportunities(
+        [ads_perp],
+        [],
+        lookback_days=7,
+        spot_rows=[
+            _spot("SKHY", 160.0, underlying="SKHY"),
+            _spot(
+                "000660.KS",
+                1280.0,
+                venue="kr_equity",
+                underlying="SKHYNIX",
+                market="KR",
+                local_price=1_900_000,
+                currency="KRW",
+                local_per_usd=1484.375,
+            ),
+        ],
+    )
+
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity.long_venue == "us_equity"
+    assert opportunity.spot_market == "US"
+    assert opportunity.spot_symbol == "SKHY"
+    assert opportunity.spot_units_per_perp_unit == 1
+    assert opportunity.spot_equivalent_price_usd == 160
+    assert opportunity.spot_perp_basis_pct == pytest.approx(1.875)
+
+
+def test_skhynix_common_share_does_not_fall_back_to_us_ads() -> None:
+    row = _current("xyz", "xyz:SKHX", 0.00002, 0.00009)
+    row.update(underlying="SKHYNIX", mark_price=1280.0, index_price=1279.0)
+
+    assert build_carry_opportunities(
+        [row],
+        [],
+        lookback_days=7,
+        spot_rows=[_spot("SKHY", 160.0, underlying="SKHY")],
+    ) == []
 
 
 def test_bb_uses_one_to_one_us_share_price() -> None:

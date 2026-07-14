@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     prediction_status_window_minutes: int = 60
     frontend_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     core_underlyings: str = "AAPL,NVDA,TSLA,GOOGL,SPY,QQQ,MSFT,AMZN,META,MSTR,HOOD,CRCL,COIN,PLTR"
-    enabled_venues: str = "binance,bitget,bybit,gate,kraken,okx,lighter,extended,xyz,hotstuff,orderly,us_equity"
+    enabled_venues: str = "binance,bitget,bybit,gate,kraken,okx,lighter,extended,xyz,hotstuff,orderly,us_equity,kr_equity"
 
     @property
     def origins(self) -> list[str]:

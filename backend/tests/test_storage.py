@@ -111,6 +111,11 @@ def test_stock_quote_is_separate_from_perpetual_rows(tmp_path) -> None:
             "provider_symbol": "BB",
             "quote_session": "closed",
             "quote_delayed": True,
+            "spot_market": None,
+            "local_price": None,
+            "local_currency": None,
+            "local_per_usd": None,
+            "fx_symbol": None,
         }
     ]
 

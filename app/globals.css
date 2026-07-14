@@ -750,7 +750,7 @@ tbody tr:last-child td {
 }
 
 .priceBasisCell {
-  min-width: 190px;
+  min-width: 240px;
   font-family: var(--font-geist-mono), monospace;
   font-variant-numeric: tabular-nums;
 }
@@ -775,6 +775,38 @@ tbody tr:last-child td {
 .priceBasisStack > div strong {
   color: #dce9e3;
   font-size: 11px;
+}
+
+.priceLegIdentity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.marketTag {
+  display: inline-flex;
+  padding: 3px 5px;
+  border-radius: 5px;
+  font: 700 8px/1 var(--font-geist-mono), monospace;
+  letter-spacing: 0.04em;
+}
+
+.marketTag.us {
+  color: #b8c6ff;
+  background: rgba(127, 159, 255, 0.1);
+  border: 1px solid rgba(127, 159, 255, 0.2);
+}
+
+.marketTag.kr {
+  color: #f3d39b;
+  background: rgba(245, 187, 103, 0.1);
+  border: 1px solid rgba(245, 187, 103, 0.2);
+}
+
+.priceBasisStack .usdConversionLine span,
+.priceBasisStack .usdConversionLine strong {
+  color: #96a99f;
+  font-size: 9px;
 }
 
 .priceBasisStack small {
@@ -864,7 +896,7 @@ tbody tr:last-child td {
 }
 
 .quoteMeta {
-  max-width: 205px;
+  max-width: 235px;
 }
 
 .notApplicable {

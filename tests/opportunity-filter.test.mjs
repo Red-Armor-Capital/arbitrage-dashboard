@@ -24,6 +24,14 @@ test("US spot does not require an additional DEX account", () => {
   assert.equal(matchesDexSelection(item, new Set(["xyz"])), false);
 });
 
+test("Korean spot does not require an additional DEX account", () => {
+  const item = opportunity("kr_equity", "xyz");
+
+  assert.deepEqual(requiredDexVenues(item), ["xyz"]);
+  assert.equal(matchesDexSelection(item, new Set(["xyz"])), true);
+  assert.equal(matchesDexSelection(item, new Set(["lighter"])), false);
+});
+
 test("perp-perp opportunities require both DEX venues", () => {
   const item = opportunity("lighter", "xyz");
 

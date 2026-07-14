@@ -515,6 +515,11 @@ class CarryStore:
             result["provider_symbol"] = metadata.get("provider_symbol")
             result["quote_session"] = metadata.get("quote_session")
             result["quote_delayed"] = metadata.get("quote_delayed") is True
+            result["spot_market"] = metadata.get("spot_market")
+            result["local_price"] = metadata.get("local_price")
+            result["local_currency"] = metadata.get("local_currency")
+            result["local_per_usd"] = metadata.get("local_per_usd")
+            result["fx_symbol"] = metadata.get("fx_symbol")
             results.append(result)
         return results
 
