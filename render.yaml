@@ -5,7 +5,7 @@ services:
     plan: free
     region: singapore
     buildCommand: pip install -r requirements.txt
-    startCommand: CARRY_HISTORY_SYMBOL_CONCURRENCY=2 uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    startCommand: CARRY_HISTORY_SYMBOL_CONCURRENCY=2 CARRY_HISTORY_SYMBOL_BATCH_SIZE=2 uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:

@@ -62,6 +62,7 @@ npm run dev
 - `CARRY_HISTORY_LOOKBACK_DAYS`：统计窗口。
 - `CARRY_HISTORY_VENUE_CONCURRENCY`：同时执行历史回填的平台数，默认 1；小内存实例应保持为 1。
 - `CARRY_HISTORY_SYMBOL_CONCURRENCY`：单个平台同时回填历史的合约数，默认 8；小内存实例建议设为 2。
+- `CARRY_HISTORY_SYMBOL_BATCH_SIZE`：单个平台每批保留的合约历史结果数，默认 8；小内存实例建议设为 2。
 - `CARRY_DATABASE_PATH`：DuckDB 路径。
 - `CARRY_FRONTEND_ORIGINS`：生产前端允许访问 API 的精确 Origin；本地 `localhost`/`127.0.0.1` 任意端口默认由 `CARRY_FRONTEND_ORIGIN_REGEX` 放行。
 - `CARRY_CURRENT_MARKET_MAX_AGE_SECONDS`：永续实时快照最大年龄，默认 120 秒；离线来源与超过该阈值的旧快照不参与机会计算。

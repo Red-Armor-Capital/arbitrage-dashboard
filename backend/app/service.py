@@ -742,53 +742,87 @@ class CarryService:
             )
         ]
         if due:
-            batch_error: str | None = None
-            try:
-                batch = await adapter.collect_history(due, history_since)
-                for offset in range(0, len(batch.funding), HISTORY_WRITE_BATCH_SIZE):
+            request_batch_size = (
+                len(due)
+                if adapter.history_request_scope == "venue"
+                else max(1, self.config.history_symbol_batch_size)
+            )
+            for offset in range(0, len(due), request_batch_size):
+                await self._refresh_history_batch(
+                    adapter,
+                    due[offset : offset + request_batch_size],
+                    history_since,
+                )
+                await asyncio.sleep(0)
+
+        return self._history_failure_summary(adapter, instruments)
+
+    async def _refresh_history_batch(
+        self,
+        adapter: VenueAdapter,
+        instruments: list[Instrument],
+        history_since: datetime,
+    ) -> None:
+        batch_keys = {
+            (adapter.venue, instrument.symbol) for instrument in instruments
+        }
+        batch_error: str | None = None
+        try:
+            batch = await adapter.collect_history(instruments, history_since)
+            for outcome in batch.outcomes:
+                key = (adapter.venue, outcome.instrument.symbol)
+                if key not in batch_keys:
+                    continue
+                for offset in range(
+                    0,
+                    len(outcome.funding),
+                    HISTORY_WRITE_BATCH_SIZE,
+                ):
                     self.store.upsert_funding(
-                        batch.funding[offset : offset + HISTORY_WRITE_BATCH_SIZE]
+                        outcome.funding[
+                            offset : offset + HISTORY_WRITE_BATCH_SIZE
+                        ]
                     )
                     await asyncio.sleep(0)
-            except Exception as exc:
-                batch_error = f"{type(exc).__name__}: {exc}".rstrip()[:240]
-                batch = None
-            completed_at = datetime.now(timezone.utc)
-            if batch_error is not None:
-                for instrument in due:
-                    key = (adapter.venue, instrument.symbol)
-                    self._history_next_attempt_at[key] = (
-                        completed_at + HISTORY_FAILURE_RETRY_INTERVAL
-                    )
-                    self._history_failures[key] = batch_error
+                outcome.funding.clear()
+        except Exception as exc:
+            batch_error = f"{type(exc).__name__}: {exc}".rstrip()[:240]
+            batch = None
 
-            seen: set[HistoryKey] = set()
-            for outcome in batch.outcomes if batch is not None else []:
-                key = (adapter.venue, outcome.instrument.symbol)
-                if key not in active_keys:
-                    continue
-                seen.add(key)
-                if outcome.success:
-                    self._history_next_attempt_at[key] = (
-                        completed_at + HISTORY_REFRESH_INTERVAL
-                    )
-                    self._history_failures.pop(key, None)
-                else:
-                    self._history_next_attempt_at[key] = (
-                        completed_at + HISTORY_FAILURE_RETRY_INTERVAL
-                    )
-                    self._history_failures[key] = outcome.error or "unknown error"
-
-            for instrument in due:
+        completed_at = datetime.now(timezone.utc)
+        if batch_error is not None:
+            for instrument in instruments:
                 key = (adapter.venue, instrument.symbol)
-                if batch is None or key in seen:
-                    continue
                 self._history_next_attempt_at[key] = (
                     completed_at + HISTORY_FAILURE_RETRY_INTERVAL
                 )
-                self._history_failures[key] = "no outcome returned"
+                self._history_failures[key] = batch_error
 
-        return self._history_failure_summary(adapter, instruments)
+        seen: set[HistoryKey] = set()
+        for outcome in batch.outcomes if batch is not None else []:
+            key = (adapter.venue, outcome.instrument.symbol)
+            if key not in batch_keys:
+                continue
+            seen.add(key)
+            if outcome.success:
+                self._history_next_attempt_at[key] = (
+                    completed_at + HISTORY_REFRESH_INTERVAL
+                )
+                self._history_failures.pop(key, None)
+            else:
+                self._history_next_attempt_at[key] = (
+                    completed_at + HISTORY_FAILURE_RETRY_INTERVAL
+                )
+                self._history_failures[key] = outcome.error or "unknown error"
+
+        for instrument in instruments:
+            key = (adapter.venue, instrument.symbol)
+            if batch is None or key in seen:
+                continue
+            self._history_next_attempt_at[key] = (
+                completed_at + HISTORY_FAILURE_RETRY_INTERVAL
+            )
+            self._history_failures[key] = "no outcome returned"
 
     def _history_failure_summary(
         self,

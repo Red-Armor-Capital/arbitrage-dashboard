@@ -719,6 +719,7 @@ class XyzAdapter(VenueAdapter):
 class HotstuffAdapter(VenueAdapter):
     venue = "hotstuff"
     history_mode = "per_symbol"
+    history_request_scope = "venue"
     base_url = "https://api.hotstuff.trade/info"
     maker_fee = -0.00002
     taker_fee = 0.00025

@@ -19,6 +19,7 @@ from ..models import (
 class VenueAdapter(ABC):
     venue: str
     history_mode: Literal["embedded", "per_symbol"] = "embedded"
+    history_request_scope: Literal["symbol", "venue"] = "symbol"
     history_concurrency = 8
 
     def __init__(self, client: httpx.AsyncClient, underlyings: set[str]) -> None:

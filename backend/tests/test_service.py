@@ -125,6 +125,29 @@ class HighConcurrencyAdapter(ConcurrencyAdapter):
     history_concurrency = 8
 
 
+class BatchRecordingAdapter(PerSymbolAdapter):
+    def __init__(self, client: httpx.AsyncClient, underlyings: set[str]) -> None:
+        super().__init__(client, underlyings)
+        self.history_batches: list[list[str]] = []
+
+    async def collect_history(self, instruments, history_since):
+        self.history_batches.append([item.symbol for item in instruments])
+        return await super().collect_history(instruments, history_since)
+
+
+class VenueScopedBatchRecordingAdapter(BatchRecordingAdapter):
+    history_request_scope = "venue"
+
+
+class FailingMiddleBatchAdapter(BatchRecordingAdapter):
+    async def collect_history(self, instruments, history_since):
+        symbols = [item.symbol for item in instruments]
+        self.history_batches.append(symbols)
+        if symbols == ["C", "D"]:
+            raise RuntimeError("middle batch unavailable")
+        return await VenueAdapter.collect_history(self, instruments, history_since)
+
+
 @pytest.mark.asyncio
 async def test_service_caps_history_concurrency_per_adapter_instance(tmp_path) -> None:
     service = CarryService(
@@ -148,6 +171,102 @@ async def test_service_caps_history_concurrency_per_adapter_instance(tmp_path) -
 
         assert adapter.max_active_history_requests == 2
         assert HighConcurrencyAdapter.history_concurrency == 8
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_factory", "expected_batches"),
+    [
+        (BatchRecordingAdapter, [["A", "B"], ["C", "D"], ["E"]]),
+        (VenueScopedBatchRecordingAdapter, [["A", "B", "C", "D", "E"]]),
+    ],
+)
+async def test_service_batches_only_symbol_scoped_history_requests(
+    tmp_path,
+    adapter_factory,
+    expected_batches,
+) -> None:
+    store = CarryStore(tmp_path / "store.duckdb")
+    service = CarryService(
+        Settings(
+            _env_file=None,
+            database_path=tmp_path / "carry.duckdb",
+            history_symbol_batch_size=2,
+        ),
+        store,
+        [adapter_factory],
+    )
+    adapter = service.adapters[0]
+    adapter.symbols = ["A", "B", "C", "D", "E"]
+    instruments = [adapter._instrument(symbol) for symbol in adapter.symbols]
+    store.sync_instruments(adapter.venue, instruments)
+    now = datetime.now(timezone.utc)
+
+    try:
+        await service._refresh_per_symbol_history(
+            adapter,
+            instruments,
+            now - timedelta(days=7),
+            now,
+        )
+
+        assert adapter.history_batches == expected_batches
+        assert {
+            row["symbol"]
+            for row in store.get_settled_funding(now - timedelta(days=1))
+        } == {"A", "B", "C", "D", "E"}
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_history_batch_failure_does_not_block_later_batches(tmp_path) -> None:
+    store = CarryStore(tmp_path / "store.duckdb")
+    service = CarryService(
+        Settings(
+            _env_file=None,
+            database_path=tmp_path / "carry.duckdb",
+            history_symbol_batch_size=2,
+        ),
+        store,
+        [FailingMiddleBatchAdapter],
+    )
+    adapter = service.adapters[0]
+    adapter.symbols = ["A", "B", "C", "D", "E", "F"]
+    instruments = [adapter._instrument(symbol) for symbol in adapter.symbols]
+    store.sync_instruments(adapter.venue, instruments)
+    now = datetime.now(timezone.utc)
+
+    try:
+        await service._refresh_per_symbol_history(
+            adapter,
+            instruments,
+            now - timedelta(days=7),
+            now,
+        )
+
+        assert adapter.history_batches == [
+            ["A", "B"],
+            ["C", "D"],
+            ["E", "F"],
+        ]
+        assert {
+            row["symbol"]
+            for row in store.get_settled_funding(now - timedelta(days=1))
+        } == {"A", "B", "E", "F"}
+        for symbol in ("A", "B", "E", "F"):
+            assert service._history_next_attempt_at[(adapter.venue, symbol)] > (
+                now + timedelta(minutes=50)
+            )
+        for symbol in ("C", "D"):
+            assert service._history_next_attempt_at[(adapter.venue, symbol)] < (
+                now + timedelta(minutes=3)
+            )
+            assert "middle batch unavailable" in service._history_failures[
+                (adapter.venue, symbol)
+            ]
     finally:
         await service.stop()
 

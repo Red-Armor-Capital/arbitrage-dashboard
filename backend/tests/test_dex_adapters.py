@@ -28,6 +28,10 @@ def test_seconds_parses_epoch_and_rejects_invalid_values() -> None:
     assert _seconds(0) is None
 
 
+def test_hotstuff_history_request_scope_is_venue_wide() -> None:
+    assert HotstuffAdapter.history_request_scope == "venue"
+
+
 async def _collect(
     adapter_type: type,
     handler: Callable[[httpx.Request], httpx.Response],
