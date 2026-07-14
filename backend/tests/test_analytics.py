@@ -90,6 +90,11 @@ def test_builds_short_high_long_low_and_breakeven() -> None:
     expected_fee = 2 * (0.00025 + 0.0001)
     assert row.round_trip_fee_pct == pytest.approx(expected_fee * 100)
     assert row.breakeven_hours == pytest.approx(expected_fee / 0.000015)
+    assert row.long_liquidity is not None
+    assert row.long_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.long_liquidity.open_interest_usd == pytest.approx(100_050)
+    assert row.short_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.short_liquidity.open_interest_usd == pytest.approx(100_050)
 
 
 def test_uses_current_rate_when_no_history_exists() -> None:
@@ -158,6 +163,10 @@ def test_builds_us_spot_chain_perp_from_single_perp_history() -> None:
     assert row.spot_equivalent_price_usd == 100
     assert row.perp_price_usd == pytest.approx(100.05)
     assert row.spot_perp_basis_pct == pytest.approx(0.05)
+    assert row.long_liquidity is None
+    assert row.short_liquidity.venue == "xyz"
+    assert row.short_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.short_liquidity.open_interest_usd == pytest.approx(100_050)
     assert row.sample_hours == 24
     assert row.history_quality == "sufficient"
     assert row.positive_ratio == 1
@@ -259,3 +268,20 @@ def test_spot_perp_requires_an_observed_us_spot_quote() -> None:
     row["underlying"] = "BB"
 
     assert build_carry_opportunities([row], [], lookback_days=7) == []
+
+
+def test_liquidity_ignores_invalid_market_values() -> None:
+    row = _current("xyz", "xyz:BB", 0.00002, 0.00009)
+    row.update(
+        underlying="BB",
+        open_interest=float("nan"),
+        volume_24h=-1,
+    )
+
+    opportunities = build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("BB", 100)]
+    )
+
+    assert len(opportunities) == 1
+    assert opportunities[0].short_liquidity.open_interest_usd is None
+    assert opportunities[0].short_liquidity.volume_24h_usd is None

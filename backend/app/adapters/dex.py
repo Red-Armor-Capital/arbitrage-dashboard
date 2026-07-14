@@ -1128,7 +1128,10 @@ class OrderlyAdapter(VenueAdapter):
                     source_tenor_hours=instrument.funding_interval_hours,
                     transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(market.get("open_interest")),
-                    volume_24h=self.as_float(market.get("24h_amount") or market.get("volume_24h")),
+                    # Orderly's 24h_amount is quote-currency notional; 24h_volume
+                    # is base-contract quantity. Keep volume_24h comparable with
+                    # Lighter daily_quote_token_volume and XYZ dayNtlVlm.
+                    volume_24h=self.as_float(market.get("24h_amount")),
                 )
             )
             if rate is not None:

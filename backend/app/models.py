@@ -128,6 +128,13 @@ class PredictionCollectorStatusResponse(BaseModel):
     venues: list[PredictionCollectorVenueStatus]
 
 
+class PerpLiquiditySnapshot(BaseModel):
+    venue: str
+    symbol: str
+    volume_24h_usd: float | None = None
+    open_interest_usd: float | None = None
+
+
 class CarryOpportunity(BaseModel):
     underlying: str
     display_name: str | None = None
@@ -151,6 +158,8 @@ class CarryOpportunity(BaseModel):
     history_quality: Literal["sufficient", "limited", "unavailable"]
     long_funding_apr: float
     short_funding_apr: float
+    long_liquidity: PerpLiquiditySnapshot | None = None
+    short_liquidity: PerpLiquiditySnapshot
     cross_basis_pct: float | None = None
     spot_symbol: str | None = None
     spot_price_usd: float | None = None

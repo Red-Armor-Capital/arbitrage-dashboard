@@ -5,7 +5,7 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from .models import CarryOpportunity
+from .models import CarryOpportunity, PerpLiquiditySnapshot
 from .us_equity import US_EQUITY_VENUE, get_us_spot_spec
 
 
@@ -85,6 +85,32 @@ def _freshness_seconds(observed_at: datetime, now: datetime) -> float:
 def _asset_class(row: dict) -> str:
     value = str(row.get("asset_class") or "unknown").lower()
     return value if value in ASSET_CLASSES else "unknown"
+
+
+def _nonnegative_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _perp_liquidity(row: dict) -> PerpLiquiditySnapshot:
+    price = _nonnegative_float(row.get("mark_price") or row.get("index_price"))
+    open_interest = _nonnegative_float(row.get("open_interest"))
+    open_interest_usd = (
+        open_interest * price
+        if open_interest is not None and price is not None and price > 0
+        else None
+    )
+    return PerpLiquiditySnapshot(
+        venue=str(row["venue"]),
+        symbol=str(row["symbol"]),
+        volume_24h_usd=_nonnegative_float(row.get("volume_24h")),
+        open_interest_usd=open_interest_usd,
+    )
 
 
 def build_carry_opportunities(
@@ -200,6 +226,7 @@ def build_carry_opportunities(
                     history_quality=history_quality,
                     long_funding_apr=0.0,
                     short_funding_apr=current_hourly * HOURS_PER_YEAR * 100,
+                    short_liquidity=_perp_liquidity(short_row),
                     spot_symbol=spot_spec.ticker,
                     spot_price_usd=spot_price,
                     spot_equivalent_price_usd=spot_equivalent,
@@ -284,6 +311,8 @@ def build_carry_opportunities(
                         history_quality=history_quality,
                         long_funding_apr=long_row["hourly_rate"] * HOURS_PER_YEAR * 100,
                         short_funding_apr=short_row["hourly_rate"] * HOURS_PER_YEAR * 100,
+                        long_liquidity=_perp_liquidity(long_row),
+                        short_liquidity=_perp_liquidity(short_row),
                         cross_basis_pct=cross_basis,
                         data_freshness_seconds=freshness,
                     )

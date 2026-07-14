@@ -25,6 +25,13 @@ type VenueStatus = {
   latency_ms: number | null;
 };
 
+type PerpLiquidity = {
+  venue: string;
+  symbol: string;
+  volume_24h_usd: number | null;
+  open_interest_usd: number | null;
+};
+
 type Opportunity = {
   underlying: string;
   display_name: string | null;
@@ -48,6 +55,8 @@ type Opportunity = {
   history_quality: "sufficient" | "limited" | "unavailable";
   long_funding_apr: number;
   short_funding_apr: number;
+  long_liquidity: PerpLiquidity | null;
+  short_liquidity: PerpLiquidity;
   cross_basis_pct: number | null;
   spot_symbol: string | null;
   spot_price_usd: number | null;
@@ -88,6 +97,7 @@ const sortLabels: Record<OpportunitySortKey, string> = {
   current: "当前预测年化",
   volatility: "年化波动率",
   positiveRatio: "正 Carry 占比",
+  liquidity: "24h 成交额",
   breakeven: "手续费回本",
 };
 
@@ -128,6 +138,55 @@ function formatUsd(value: number | null) {
     minimumFractionDigits: value >= 1000 ? 2 : 2,
     maximumFractionDigits: value >= 1000 ? 2 : 4,
   }).format(value);
+}
+
+function formatCompactUsd(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: value >= 1_000_000 ? 2 : 1,
+  }).format(value);
+}
+
+function LiquidityCell({ item }: { item: Opportunity }) {
+  const legs = item.strategy_type === "spot_perp"
+    ? [{ side: "永续", liquidity: item.short_liquidity }]
+    : [
+        { side: "多", liquidity: item.long_liquidity },
+        { side: "空", liquidity: item.short_liquidity },
+      ];
+
+  return (
+    <div
+      className="liquidityStack"
+      title="24h 成交额为公开报价币名义值；OI 名义按 OI × mark 估算，未包含盘口深度与实际滑点"
+    >
+      {legs.map(({ side, liquidity }) => (
+        <div
+          className={`liquidityLeg ${side === "多" ? "longLiquidityLeg" : "shortLiquidityLeg"}`}
+          key={`${side}-${liquidity?.venue ?? "missing"}-${liquidity?.symbol ?? "missing"}`}
+        >
+          <span className="liquidityVenue">
+            {side} · {liquidity ? venueLabel(liquidity.venue) : "数据缺失"}
+          </span>
+          <div className="liquidityMetrics">
+            <span>
+              <b>24h</b>
+              <strong>{formatCompactUsd(liquidity?.volume_24h_usd ?? null)}</strong>
+            </span>
+            <span>
+              <b>OI</b>
+              <strong>{formatCompactUsd(liquidity?.open_interest_usd ?? null)}</strong>
+            </span>
+          </div>
+        </div>
+      ))}
+      <small>成交额 / OI 名义估算</small>
+    </div>
+  );
 }
 
 function quoteSessionLabel(value: string | null, delayed: boolean | null) {
@@ -516,6 +575,7 @@ export default function Home() {
                       <option value="current">当前预测年化</option>
                       <option value="volatility">年化波动率</option>
                       <option value="positiveRatio">正 Carry 占比</option>
+                      <option value="liquidity">24h 成交额</option>
                       <option value="breakeven">手续费回本</option>
                     </select>
                   </label>
@@ -604,6 +664,14 @@ export default function Home() {
               </span>
             </div>
 
+            <div className="liquidityBanner">
+              <strong>流动性口径</strong>
+              <span>
+                24h 成交额看近期活跃度，OI 名义看市场存量；两者都不等于实际可成交深度，
+                本版不合成主观评分，也不把口径不一致的盘口报价混在一起比较。
+              </span>
+            </div>
+
             {error && (
               <div className="errorBanner" role="alert">
                 <strong>实时后端尚未连通</strong>
@@ -628,6 +696,13 @@ export default function Home() {
                     <th scope="col">标的</th>
                     <th scope="col">Carry 来源</th>
                     <th scope="col">美股 / 合约</th>
+                    <SortableHeader
+                      label="永续流动性"
+                      sortKey="liquidity"
+                      activeSortKey={sortKey}
+                      direction={sortDirection}
+                      onSort={handleSort}
+                    />
                     <SortableHeader
                       label="当前预测年化"
                       sortKey="current"
@@ -749,6 +824,9 @@ export default function Home() {
                           ) : (
                             <span className="notApplicable">—<small>仅现货—永续适用</small></span>
                           )}
+                        </td>
+                        <td className="liquidityCell">
+                          <LiquidityCell item={item} />
                         </td>
                         <td className="numberCell positiveValue">
                           {formatApr(item.current_carry_apr)}

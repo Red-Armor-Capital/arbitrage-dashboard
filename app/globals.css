@@ -535,6 +535,27 @@ button {
   line-height: 1.55;
 }
 
+.liquidityBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 20px;
+  color: #b8c7ef;
+  background: rgba(127, 159, 255, 0.045);
+  border-bottom: 1px solid rgba(127, 159, 255, 0.13);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.liquidityBanner strong {
+  flex: 0 0 auto;
+  color: #a8bbff;
+}
+
+.liquidityBanner span {
+  color: #8f9dc4;
+}
+
 .assumptionBanner strong {
   flex: 0 0 auto;
   color: var(--amber);
@@ -566,7 +587,7 @@ button {
 
 table {
   width: 100%;
-  min-width: 1400px;
+  min-width: 1580px;
   border-collapse: collapse;
 }
 
@@ -760,6 +781,67 @@ tbody tr:last-child td {
   color: var(--faint);
   font-family: var(--font-geist-sans), sans-serif;
   line-height: 1.35;
+}
+
+.liquidityCell {
+  min-width: 178px;
+  font-family: var(--font-geist-mono), monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.liquidityStack {
+  display: grid;
+  gap: 6px;
+}
+
+.liquidityLeg {
+  display: grid;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(82, 226, 164, 0.42);
+}
+
+.liquidityLeg.longLiquidityLeg {
+  border-left-color: rgba(127, 159, 255, 0.52);
+}
+
+.liquidityVenue {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.liquidityMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.liquidityMetrics span,
+.liquidityMetrics b,
+.liquidityMetrics strong {
+  display: block;
+}
+
+.liquidityMetrics b {
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.liquidityMetrics strong {
+  color: #d8e7df;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.liquidityStack > small {
+  color: var(--faint);
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 9px;
 }
 
 .basisPill {
@@ -1021,12 +1103,25 @@ footer {
     display: block;
   }
 
+  .liquidityBanner {
+    display: block;
+  }
+
   .assumptionBanner strong,
   .assumptionBanner span {
     display: block;
   }
 
   .assumptionBanner strong {
+    margin-bottom: 5px;
+  }
+
+  .liquidityBanner strong,
+  .liquidityBanner span {
+    display: block;
+  }
+
+  .liquidityBanner strong {
     margin-bottom: 5px;
   }
 
