@@ -43,12 +43,16 @@ class UsEquityCollection:
 # that a DEX contract has an equivalent, publicly traded US spot leg.
 _ONE_TO_ONE_US_TICKERS = frozenset(
     {
-        "AAPL", "AAOI", "AMD", "AMZN", "ARM", "ASML", "AVGO", "BABA",
-        "BB", "BE", "BMNR", "COIN", "CRCL", "CRWV", "DELL", "GME",
-        "GOOGL", "HOOD", "IBM", "INTC", "IWM", "LITE", "META", "MRVL",
-        "MSFT", "MSTR", "MU", "NBIS", "NOK", "NOW", "NVDA", "ORCL",
-        "PLTR", "QCOM", "QQQ", "RKLB", "SNDK", "SOXL", "SPY", "STRC",
-        "TSLA", "TSM", "TTWO", "URA", "WDC", "WEN",
+        "AAPL", "AAOI", "AMAT", "AMD", "AMZN", "ARM", "ASML", "AVGO",
+        "BABA", "BB", "BE", "BIRD", "BMNR", "BOT", "BOTZ", "BX", "CBRS",
+        "COIN", "COST", "CRCL", "CRWV", "DELL", "DIA", "DKNG", "DRAM",
+        "EBAY", "EWJ", "EWT", "EWY", "EWZ", "GLW", "GME", "GOOG", "GOOGL",
+        "HIMS", "HOOD", "IBM", "INTC", "IWM", "KORU", "LITE", "LLY", "MAGS",
+        "META", "MRVL", "MSFT", "MSTR", "MU", "NBIS", "NFLX", "NOK",
+        "NOW", "NVDA", "ORCL", "PLTR", "PURR", "QCOM", "QNT", "QQQ",
+        "RIVN", "RKLB", "SHAZ", "SMH", "SNDK", "SOXL", "SPY", "STRC",
+        "TSLA", "TSM", "TTWO", "URA", "URNM", "USAR", "WDC", "WEN",
+        "XLE", "ZM",
     }
 )
 
@@ -73,7 +77,7 @@ def _session_for_timestamp(meta: dict[str, Any], timestamp: int) -> str:
     periods = meta.get("currentTradingPeriod") or {}
     for name in ("pre", "regular", "post"):
         period = periods.get(name) or {}
-        if int(period.get("start") or 0) <= timestamp <= int(period.get("end") or 0):
+        if int(period.get("start") or 0) <= timestamp < int(period.get("end") or 0):
             return name
     return str(meta.get("marketState") or "closed").lower()
 
@@ -246,6 +250,14 @@ async def collect_us_equity_quotes(
             "local_price": quote.price if quote else None,
             "local_currency": "USD",
             "local_per_usd": 1.0,
+            "market": "US",
+            "ticker": spec.ticker,
+            "quote_valid": quote is not None,
+            "delay_status": (
+                "unavailable"
+                if quote is None
+                else "delayed" if quote.is_delayed else "realtime"
+            ),
         }
         instruments.append(
             Instrument(

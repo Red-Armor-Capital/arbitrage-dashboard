@@ -22,6 +22,7 @@ class KrSpotSpec:
     underlying: str
     ticker: str
     quote_symbols: tuple[str, ...]
+    display_name: str
     spot_units_per_perp_unit: float = 1.0
 
 
@@ -33,9 +34,17 @@ class KrEquityCollection:
 
 def get_kr_spot_spec(underlying: str) -> KrSpotSpec | None:
     normalized = underlying.strip().upper()
-    if normalized == "SKHYNIX":
-        return KrSpotSpec(normalized, "000660.KS", ("000660.KS",))
-    return None
+    values = {
+        "SKHYNIX": ("000660.KS", "SK Hynix · KRX common share"),
+        "SAMSUNG": ("005930.KS", "Samsung Electronics · KRX common share"),
+        "HYUNDAI": ("005380.KS", "Hyundai Motor · KRX common share"),
+        "HANMI": ("042700.KS", "Hanmi Semiconductor · KRX common share"),
+    }
+    value = values.get(normalized)
+    if value is None:
+        return None
+    ticker, display_name = value
+    return KrSpotSpec(normalized, ticker, (ticker,), display_name)
 
 
 def _number(value: object) -> float:
@@ -218,48 +227,69 @@ async def collect_kr_equity_quotes(
         _fx_quote(client),
     )
     fx_quote, fx_error = fx_outcome
-    if fx_quote is None or fx_quote.price <= 0:
-        error = fx_error or f"{USD_KRW_SYMBOL}: invalid USD/KRW quote"
-        return KrEquityCollection(result=AdapterResult(), errors=(error,))
+    fx_valid = fx_quote is not None and fx_quote.price > 0
 
     instruments: list[Instrument] = []
     snapshots: list[MarketSnapshot] = []
     errors: list[str] = []
+    if not fx_valid:
+        errors.append(fx_error or f"{USD_KRW_SYMBOL}: invalid USD/KRW quote")
     for spec, (quote, error) in zip(specs, equity_outcomes, strict=True):
+        quote_valid = quote is not None and fx_valid
         metadata: dict[str, object] = {
-            "quote_source": _combined_source(quote, fx_quote) if quote else None,
+            "quote_source": (
+                _combined_source(quote, fx_quote)
+                if quote is not None and fx_quote is not None
+                else None
+            ),
             "provider_symbol": (
                 quote.provider_symbol if quote else spec.quote_symbols[0]
             ),
             "quote_session": quote.session if quote else "unavailable",
             "quote_delayed": (
-                (quote.is_delayed or fx_quote.is_delayed) if quote else True
+                (quote.is_delayed or fx_quote.is_delayed)
+                if quote is not None and fx_quote is not None
+                else True
             ),
             "spot_market": "KR",
+            "market": "KR",
+            "ticker": spec.ticker,
+            "mic": "XKRX",
             "local_price": quote.price if quote else None,
             "local_currency": "KRW",
-            "local_per_usd": fx_quote.price,
+            "local_per_usd": fx_quote.price if fx_quote is not None else None,
             "fx_symbol": USD_KRW_SYMBOL,
-            "fx_source": fx_quote.source,
-            "fx_observed_at": fx_quote.observed_at.isoformat(),
+            "fx_source": fx_quote.source if fx_quote is not None else None,
+            "fx_observed_at": (
+                fx_quote.observed_at.isoformat() if fx_quote is not None else None
+            ),
             "stock_observed_at": quote.observed_at.isoformat() if quote else None,
+            "quote_valid": quote_valid,
+            "delay_status": (
+                "unavailable"
+                if not quote_valid
+                else "delayed"
+                if quote.is_delayed or fx_quote.is_delayed
+                else "realtime"
+            ),
         }
         instruments.append(
             Instrument(
                 venue=KR_EQUITY_VENUE,
                 symbol=spec.ticker,
                 underlying=spec.underlying,
-                display_name="SK Hynix · KRX common share",
+                display_name=spec.display_name,
                 product_type="stock",
                 quote_currency="USD",
                 metadata=metadata,
             )
         )
-        if quote is None:
+        if not quote_valid:
             if error:
                 errors.append(f"{spec.ticker}: {error}")
             continue
 
+        assert quote is not None and fx_quote is not None
         usd_price = quote.price / fx_quote.price
         observed_at = min(quote.observed_at, fx_quote.observed_at)
         snapshots.append(

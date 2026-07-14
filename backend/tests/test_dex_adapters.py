@@ -410,6 +410,38 @@ async def test_xyz_fails_closed_when_stock_category_is_unavailable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_xyz_uses_reviewed_exact_link_for_qnt_category_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["type"] == "metaAndAssetCtxs":
+            return httpx.Response(
+                200,
+                json=[
+                    {"universe": [{"name": "QNT", "growthMode": "enabled"}]},
+                    [{"markPx": "42", "oraclePx": "42", "funding": "0.0001"}],
+                ],
+            )
+        if body["type"] == "perpCategories":
+            # The DEX documentation already describes public Nasdaq QNT while
+            # this category endpoint can temporarily retain the pre-IPO label.
+            return httpx.Response(
+                200,
+                json=[["xyz:AAPL", "stocks"], ["xyz:QNT", "preipo"]],
+            )
+        raise AssertionError(f"Unexpected request body: {body}")
+
+    result = await _collect(XyzAdapter, handler)
+
+    assert [(item.symbol, item.underlying) for item in result.instruments] == [
+        ("xyz:QNT", "QNT")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hotstuff_uses_price_index_and_excludes_delisted_instruments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

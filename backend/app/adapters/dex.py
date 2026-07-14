@@ -23,6 +23,7 @@ from ..models import (
     MarketSnapshot,
     utc_now,
 )
+from ..security_registry import resolve_contract_spot
 
 
 def _millis(value: object) -> datetime | None:
@@ -258,6 +259,10 @@ class LighterAdapter(VenueAdapter):
                     "funding_clamp_big": item.get("funding_clamp_big"),
                     "market_type": item.get("market_type"),
                     "strategy_index": detail.get("strategy_index"),
+                    "force_reduce_only": (
+                        (detail.get("market_config") or {}).get("force_reduce_only")
+                        is True
+                    ),
                     "status": status,
                     **asset_metadata(spec, symbol),
                 },
@@ -601,7 +606,11 @@ class XyzAdapter(VenueAdapter):
             coin = raw_name if raw_name.startswith("xyz:") else f"xyz:{raw_name}"
             if item.get("isDelisted"):
                 continue
-            if coin not in stock_coins and raw_name not in stock_coins:
+            if (
+                coin not in stock_coins
+                and raw_name not in stock_coins
+                and resolve_contract_spot(self.venue, coin) is None
+            ):
                 continue
             raw_underlying = raw_name.split(":")[-1].upper()
             if not raw_underlying:

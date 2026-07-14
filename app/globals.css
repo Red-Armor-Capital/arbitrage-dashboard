@@ -321,6 +321,15 @@ button {
   text-align: right;
 }
 
+.minAprField input {
+  width: 68px;
+}
+
+.minAprField input::placeholder {
+  color: var(--faint);
+  font-size: 10px;
+}
+
 .selectField select {
   width: 94px;
   color-scheme: dark;
@@ -803,6 +812,24 @@ tbody tr:last-child td {
   border: 1px solid rgba(245, 187, 103, 0.2);
 }
 
+.marketTag.hk {
+  color: #9ee8d9;
+  background: rgba(82, 226, 164, 0.09);
+  border: 1px solid rgba(82, 226, 164, 0.19);
+}
+
+.marketTag.jp {
+  color: #edb8b5;
+  background: rgba(255, 127, 120, 0.08);
+  border: 1px solid rgba(255, 127, 120, 0.18);
+}
+
+.marketTag.tw {
+  color: #cbbcff;
+  background: rgba(166, 135, 255, 0.08);
+  border: 1px solid rgba(166, 135, 255, 0.18);
+}
+
 .priceBasisStack .usdConversionLine span,
 .priceBasisStack .usdConversionLine strong {
   color: #96a99f;
@@ -925,6 +952,16 @@ tbody tr:last-child td {
 
 .positiveValue {
   color: var(--green);
+  font-weight: 650;
+}
+
+.negativeValue {
+  color: var(--red);
+  font-weight: 650;
+}
+
+.neutralValue {
+  color: var(--muted);
   font-weight: 650;
 }
 

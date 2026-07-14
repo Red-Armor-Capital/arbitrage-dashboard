@@ -11,10 +11,10 @@ import httpx
 from .adapters.base import VenueAdapter
 from .analytics import MIN_STABILITY_SAMPLE_HOURS, build_carry_opportunities
 from .config import Settings
+from .international_equity import collect_international_equity_quotes
 from .kr_equity import (
     KR_EQUITY_VENUE,
     collect_kr_equity_quotes,
-    get_kr_spot_spec,
 )
 from .models import (
     DashboardResponse,
@@ -24,8 +24,9 @@ from .models import (
     VenueStatus,
 )
 from .prediction import MinutePredictionCollector
+from .security_registry import SecuritySpec, securities_for_contracts
 from .storage import CarryStore
-from .us_equity import US_EQUITY_VENUE, collect_us_equity_quotes, get_us_spot_spec
+from .us_equity import US_EQUITY_VENUE, collect_us_equity_quotes
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,51 @@ HistoryKey = tuple[str, str]
 PREDICTION_VENUES = frozenset({"lighter", "extended", "xyz", "hotstuff", "orderly"})
 ARCHIVE_MAINTENANCE_INTERVAL_SECONDS = 24 * 60 * 60
 PREDICTION_FLUSH_INTERVAL_SECONDS = 1
+INTERNATIONAL_SPOT_MARKETS = frozenset({"HK", "JP", "TW"})
+USABLE_LIVE_STATUSES = frozenset({"healthy", "degraded"})
+
+
+def _fresh_live_rows(
+    rows: list[dict],
+    statuses: list[VenueStatus],
+    *,
+    now: datetime,
+    max_age_seconds: int,
+) -> list[dict]:
+    """Fail closed when a live venue is offline or its last snapshot is stale."""
+
+    usable_venues = {
+        status.venue
+        for status in statuses
+        if status.status in USABLE_LIVE_STATUSES and status.last_success_at is not None
+    }
+    result: list[dict] = []
+    for row in rows:
+        if str(row.get("venue") or "") not in usable_venues:
+            continue
+        observed_at = row.get("source_observed_at") or row.get("observed_at")
+        if not isinstance(observed_at, datetime):
+            continue
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        age_seconds = (now - observed_at.astimezone(timezone.utc)).total_seconds()
+        if 0 <= age_seconds <= max_age_seconds:
+            result.append(row)
+    return result
+
+
+def _rows_from_usable_venues(
+    rows: list[dict],
+    statuses: list[VenueStatus],
+) -> list[dict]:
+    """Keep closed-market spot references, but never reuse an offline source."""
+
+    usable_venues = {
+        status.venue
+        for status in statuses
+        if status.status in USABLE_LIVE_STATUSES and status.last_success_at is not None
+    }
+    return [row for row in rows if str(row.get("venue") or "") in usable_venues]
 
 
 class CarryService:
@@ -75,9 +121,8 @@ class CarryService:
         )
         self._last_archive_checked_at: datetime | None = None
         self._last_archive_error: str | None = None
-        self._last_us_equity_refresh_at: datetime | None = None
-        self._last_kr_equity_refresh_at: datetime | None = None
-        self._us_equity_offset = 0
+        self._last_spot_refresh_at: dict[str, datetime] = {}
+        self._spot_offsets: dict[str, int] = {}
 
     async def start(self) -> None:
         if self._task is None:
@@ -197,55 +242,108 @@ class CarryService:
                 await asyncio.gather(
                     self._refresh_us_equity_quotes(),
                     self._refresh_kr_equity_quotes(),
+                    self._refresh_international_equity_quotes(),
                 )
+
+    def _mapped_spot_securities(self) -> tuple[SecuritySpec, ...]:
+        return securities_for_contracts(
+            (
+                str(row.get("venue") or ""),
+                str(row.get("symbol") or ""),
+            )
+            for row in self.store.get_current_rows()
+            if row.get("venue") in PREDICTION_VENUES
+        )
+
+    def _spot_refresh_due(self, market: str, now: datetime) -> bool:
+        refreshed_at = self._last_spot_refresh_at.get(market)
+        return refreshed_at is None or (
+            now - refreshed_at
+        ).total_seconds() >= self.config.us_equity_refresh_seconds
+
+    @staticmethod
+    def _attach_security_identity(
+        result: object,
+        securities: list[SecuritySpec] | tuple[SecuritySpec, ...],
+    ) -> None:
+        specs_by_ticker = {spec.ticker.upper(): spec for spec in securities}
+        snapshots = {
+            (snapshot.venue, snapshot.symbol.upper())
+            for snapshot in getattr(result, "snapshots", [])
+        }
+        for instrument in getattr(result, "instruments", []):
+            spec = specs_by_ticker.get(instrument.symbol.upper())
+            if spec is None:
+                continue
+            instrument.underlying = spec.underlying
+            instrument.display_name = spec.display_name
+            instrument.metadata.update(
+                {
+                    "security_id": spec.security_id,
+                    "mic": spec.mic,
+                    "market": spec.market,
+                    "ticker": spec.ticker,
+                    "spot_market": spec.market,
+                    "local_currency": spec.local_currency,
+                    "fx_symbol": spec.fx_symbol,
+                    "asset_class": spec.asset_class,
+                    "spot_carry_eligible": True,
+                    "quote_valid": (
+                        instrument.venue,
+                        instrument.symbol.upper(),
+                    )
+                    in snapshots,
+                }
+            )
 
     async def _refresh_us_equity_quotes(self) -> None:
         if US_EQUITY_VENUE not in self.config.venues:
             return
         now = datetime.now(timezone.utc)
-        if (
-            self._last_us_equity_refresh_at is not None
-            and (now - self._last_us_equity_refresh_at).total_seconds()
-            < self.config.us_equity_refresh_seconds
-        ):
+        if not self._spot_refresh_due("US", now):
             return
 
-        available_underlyings = {
-            str(row["underlying"]).upper()
-            for row in self.store.get_current_rows()
-            if row.get("venue") in PREDICTION_VENUES
-            and get_us_spot_spec(str(row["underlying"])) is not None
-        }
-        if not available_underlyings:
+        available = [
+            spec for spec in self._mapped_spot_securities() if spec.market == "US"
+        ]
+        if not available:
             return
 
         priority = [
-            underlying
-            for underlying in ("BB", "SKHY")
-            if underlying in available_underlyings
+            spec for ticker in ("BB", "SKHY")
+            for spec in available
+            if spec.ticker == ticker
         ]
-        rotating = sorted(available_underlyings - set(priority))
+        priority_ids = {spec.security_id for spec in priority}
+        rotating = sorted(
+            (spec for spec in available if spec.security_id not in priority_ids),
+            key=lambda spec: spec.security_id,
+        )
         rotating_slots = max(0, self.config.us_equity_batch_size - len(priority))
         if rotating and rotating_slots:
-            start = self._us_equity_offset % len(rotating)
+            start = self._spot_offsets.get("US", 0) % len(rotating)
             selected = [
                 rotating[(start + offset) % len(rotating)]
                 for offset in range(min(rotating_slots, len(rotating)))
             ]
-            self._us_equity_offset = (start + len(selected)) % len(rotating)
+            self._spot_offsets["US"] = (start + len(selected)) % len(rotating)
         else:
             selected = []
-        underlyings = set(priority + selected)
+        securities = priority + selected
 
         started = time.perf_counter()
         try:
-            collection = await collect_us_equity_quotes(self.client, underlyings)
+            collection = await collect_us_equity_quotes(
+                self.client,
+                {spec.underlying for spec in securities},
+            )
             result = collection.result
+            self._attach_security_identity(result, securities)
             # Quotes are refreshed in rotating batches. Upsert the current batch
             # without deactivating still-valid last-good quotes from other batches.
             self.store.upsert_instruments(result.instruments)
             self.store.upsert_snapshots(result.snapshots)
-            self._last_us_equity_refresh_at = datetime.now(timezone.utc)
+            self._last_spot_refresh_at["US"] = datetime.now(timezone.utc)
             errors = list(collection.errors)
             if not result.snapshots:
                 errors.insert(0, "No live US equity quotes returned")
@@ -280,29 +378,26 @@ class CarryService:
         if KR_EQUITY_VENUE not in self.config.venues:
             return
         now = datetime.now(timezone.utc)
-        if (
-            self._last_kr_equity_refresh_at is not None
-            and (now - self._last_kr_equity_refresh_at).total_seconds()
-            < self.config.us_equity_refresh_seconds
-        ):
+        if not self._spot_refresh_due("KR", now):
             return
 
-        underlyings = {
-            str(row["underlying"]).upper()
-            for row in self.store.get_current_rows()
-            if row.get("venue") in PREDICTION_VENUES
-            and get_kr_spot_spec(str(row["underlying"])) is not None
-        }
-        if not underlyings:
+        securities = [
+            spec for spec in self._mapped_spot_securities() if spec.market == "KR"
+        ]
+        if not securities:
             return
 
         started = time.perf_counter()
         try:
-            collection = await collect_kr_equity_quotes(self.client, underlyings)
+            collection = await collect_kr_equity_quotes(
+                self.client,
+                {spec.underlying for spec in securities},
+            )
             result = collection.result
+            self._attach_security_identity(result, securities)
             self.store.upsert_instruments(result.instruments)
             self.store.upsert_snapshots(result.snapshots)
-            self._last_kr_equity_refresh_at = datetime.now(timezone.utc)
+            self._last_spot_refresh_at["KR"] = datetime.now(timezone.utc)
             errors = list(collection.errors)
             if not result.snapshots:
                 errors.insert(0, "No live Korean equity quotes returned")
@@ -332,6 +427,73 @@ class CarryService:
                     latency_ms=(time.perf_counter() - started) * 1000,
                 )
             )
+
+    async def _refresh_international_equity_quotes(self) -> None:
+        securities = self._mapped_spot_securities()
+        await asyncio.gather(
+            *(
+                self._refresh_international_market(
+                    market,
+                    [spec for spec in securities if spec.market == market],
+                )
+                for market in INTERNATIONAL_SPOT_MARKETS
+            )
+        )
+
+    async def _refresh_international_market(
+        self,
+        market: str,
+        securities: list[SecuritySpec],
+    ) -> None:
+        if not securities:
+            return
+        spot_venue = securities[0].spot_venue
+        if spot_venue not in self.config.venues:
+            return
+        now = datetime.now(timezone.utc)
+        if not self._spot_refresh_due(market, now):
+            return
+
+        started = time.perf_counter()
+        try:
+            collection = await collect_international_equity_quotes(
+                self.client,
+                securities,
+            )
+            result = collection.result
+            self.store.upsert_instruments(result.instruments)
+            self.store.upsert_snapshots(result.snapshots)
+            self._last_spot_refresh_at[market] = datetime.now(timezone.utc)
+            errors = list(collection.errors)
+            if not result.snapshots:
+                errors.insert(0, f"No valid {market} equity quotes returned")
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=spot_venue,
+                    status=(
+                        "healthy"
+                        if not errors
+                        else "degraded" if result.snapshots else "offline"
+                    ),
+                    last_success_at=(
+                        datetime.now(timezone.utc) if result.snapshots else None
+                    ),
+                    last_error="; ".join(errors)[:500] if errors else None,
+                    instruments=len(result.snapshots),
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            )
+        except Exception as exc:
+            logger.warning("%s equity quote refresh failed: %s", market, exc)
+            self.store.upsert_status(
+                VenueStatus(
+                    venue=spot_venue,
+                    status="offline",
+                    last_error=f"{type(exc).__name__}: {exc}"[:500],
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+            )
+
     async def _prediction_maintenance_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -645,9 +807,16 @@ class CarryService:
         return f"Partial history: {len(failures)} symbol(s) failed ({preview})"[:500]
 
     def dashboard(self) -> DashboardResponse:
-        current = self.store.get_current_rows()
-        spot_rows = self.store.get_spot_rows()
-        since = datetime.now(timezone.utc) - timedelta(days=self.config.history_lookback_days)
+        now = datetime.now(timezone.utc)
+        statuses = [VenueStatus.model_validate(value) for value in self.store.get_statuses()]
+        current = _fresh_live_rows(
+            self.store.get_current_rows(),
+            statuses,
+            now=now,
+            max_age_seconds=max(1, self.config.current_market_max_age_seconds),
+        )
+        spot_rows = _rows_from_usable_venues(self.store.get_spot_rows(), statuses)
+        since = now - timedelta(days=self.config.history_lookback_days)
         settled = self.store.get_settled_funding(since)
         opportunities = build_carry_opportunities(
             current_rows=current,
@@ -655,7 +824,6 @@ class CarryService:
             lookback_days=self.config.history_lookback_days,
             spot_rows=spot_rows,
         )
-        statuses = [VenueStatus.model_validate(value) for value in self.store.get_statuses()]
         sufficiently_sampled = [
             item
             for item in opportunities

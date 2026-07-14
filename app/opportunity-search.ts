@@ -6,7 +6,8 @@ export type SearchableOpportunity = {
   long_symbol: string;
   short_venue: string;
   short_symbol: string;
-  spot_market: "US" | "KR" | null;
+  spot_market: "US" | "KR" | "HK" | "JP" | "TW" | null;
+  spot_mic?: string | null;
   spot_symbol: string | null;
 };
 
@@ -18,12 +19,13 @@ export function matchesOpportunityQuery(
   const normalized = query.trim().toLowerCase();
   if (!normalized) return true;
 
-  const marketKeywords =
-    item.spot_market === "KR"
-      ? "kr krx 韩国 韩股"
-      : item.spot_market === "US"
-        ? "us 美国 美股 ads"
-        : "";
+  const marketKeywords: Record<string, string> = {
+    US: "us 美国 美股 nyse nasdaq ads",
+    KR: "kr krx 韩国 韩股",
+    HK: "hk hkex 香港 港股",
+    JP: "jp jpx tse 日本 日股",
+    TW: "tw twse 台湾 台股",
+  };
   const strategyKeywords =
     item.strategy_type === "spot_perp" ? "股票 现货 永续" : "永续";
   const identityValues = [
@@ -31,6 +33,7 @@ export function matchesOpportunityQuery(
     item.long_symbol,
     item.short_symbol,
     item.spot_symbol,
+    item.spot_mic,
   ].filter(Boolean);
   const matchesIdentity = identityValues.some((value) => {
     const raw = String(value).toLowerCase();
@@ -42,7 +45,7 @@ export function matchesOpportunityQuery(
     item.display_name,
     venueLabel(item.long_venue),
     venueLabel(item.short_venue),
-    marketKeywords,
+    marketKeywords[item.spot_market ?? ""] ?? "",
     strategyKeywords,
   ]
     .filter(Boolean)

@@ -24,7 +24,7 @@ LIGHTER_RWA_SYMBOLS = frozenset(
         "CRCL", "CRWV", "DELL", "DRAM", "EWY", "GME", "GOOGL", "HOOD",
         "HYUNDAIUSD", "IBM", "INTC", "IWM", "LITE", "META", "MINIMAX",
         "MRVL", "MSFT", "MSTR", "MU", "NBIS", "NOK", "NOW", "NVDA",
-        "OPENAI", "ORCL", "PLTR", "POPMART", "QCOM", "QQQ", "RKLB",
+        "OPENAI", "ORCL", "PLTR", "POPMART", "QCOM", "QNT", "QQQ", "RKLB",
         "SAMSUNGUSD", "SKHYNIXUSD", "SMIC", "SNDK", "SOXL", "SPCX", "SPY",
         "STRC", "TENCENT", "TSLA", "TSM", "TTWO", "URA", "US100", "US500",
         "WEN", "XIAOMI", "ZHIPU",
@@ -61,6 +61,7 @@ ALIASES = {
     "SMSN": "SAMSUNG",
     "SKHX": "SKHYNIX",
     "SKHYNIXUSD": "SKHYNIX",
+    "PURRDAT": "PURR",
     "SPCX": "SPACEX",
     "X": "SPACEX",
     "USA100": "US100",
@@ -73,6 +74,7 @@ DISPLAY_NAMES = {
     "SAMSUNG": "Samsung Electronics",
     "SKHYNIX": "SK Hynix",
     "SKHY": "SK Hynix ADS",
+    "PURR": "Purrfect Data",
     "SPACEX": "SpaceX",
     "US100": "Nasdaq 100 Index",
     "US500": "S&P 500 Index",
@@ -85,7 +87,7 @@ ETF_SYMBOLS = frozenset(
     }
 )
 INDEX_SYMBOLS = frozenset({"US100", "US500"})
-PREIPO_SYMBOLS = frozenset({"ANTHROPIC", "CBRS", "OPENAI", "SPACEX"})
+PREIPO_SYMBOLS = frozenset({"ANTHROPIC", "OPENAI", "SPACEX"})
 BASKET_SYMBOLS = frozenset()
 
 

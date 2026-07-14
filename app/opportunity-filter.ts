@@ -13,6 +13,11 @@ export type VenueOpportunity = {
   short_venue: string;
 };
 
+export type CarryOpportunity = {
+  current_carry_apr: number;
+  mean_carry_apr: number | null;
+};
+
 const dexVenueSet = new Set<string>(DEX_VENUES);
 
 export function isDexVenue(value: string): value is DexVenue {
@@ -28,6 +33,22 @@ export function matchesDexSelection(
   selectedDexes: ReadonlySet<string>,
 ) {
   return requiredDexVenues(item).every((venue) => selectedDexes.has(venue));
+}
+
+export function matchesCarrySelection(
+  item: CarryOpportunity,
+  minimumSettledApr: string,
+  currentPositiveOnly: boolean,
+) {
+  if (currentPositiveOnly && item.current_carry_apr <= 0) return false;
+
+  const normalizedMinimum = minimumSettledApr.trim();
+  if (normalizedMinimum === "") return true;
+
+  const threshold = Number(normalizedMinimum);
+  if (!Number.isFinite(threshold)) return true;
+
+  return item.mean_carry_apr !== null && item.mean_carry_apr >= threshold;
 }
 
 export function parseDexPreference(value: string | null): Set<DexVenue> | null {

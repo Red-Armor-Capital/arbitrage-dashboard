@@ -7,9 +7,16 @@ import pytest
 
 from backend.app.adapters.base import VenueAdapter
 from backend.app.config import Settings
-from backend.app.models import AdapterResult, FundingRate, Instrument, MarketSnapshot
-from backend.app.service import CarryService
+from backend.app.models import (
+    AdapterResult,
+    FundingRate,
+    Instrument,
+    MarketSnapshot,
+    VenueStatus,
+)
+from backend.app.service import CarryService, _fresh_live_rows, _rows_from_usable_venues
 from backend.app.storage import CarryStore
+from backend.app.security_registry import get_security
 
 
 class FakeAdapter(VenueAdapter):
@@ -112,6 +119,133 @@ class ConcurrencyAdapter(PerSymbolAdapter):
             return await super()._history(instrument, since)
         finally:
             self.active_history_requests -= 1
+
+
+def test_dashboard_row_filters_fail_closed_for_offline_and_stale_sources() -> None:
+    now = datetime.now(timezone.utc)
+    statuses = [
+        VenueStatus(
+            venue="healthy",
+            status="healthy",
+            last_success_at=now,
+        ),
+        VenueStatus(
+            venue="degraded",
+            status="degraded",
+            last_success_at=now,
+        ),
+        VenueStatus(
+            venue="offline",
+            status="offline",
+            last_success_at=now - timedelta(minutes=5),
+        ),
+    ]
+    rows = [
+        {"venue": "healthy", "symbol": "fresh", "observed_at": now},
+        {
+            "venue": "degraded",
+            "symbol": "partial-but-fresh",
+            "observed_at": now - timedelta(seconds=30),
+        },
+        {
+            "venue": "healthy",
+            "symbol": "stale",
+            "observed_at": now - timedelta(seconds=121),
+        },
+        {
+            "venue": "healthy",
+            "symbol": "cached-upstream",
+            "observed_at": now,
+            "source_observed_at": now - timedelta(seconds=121),
+        },
+        {"venue": "offline", "symbol": "cached", "observed_at": now},
+        {"venue": "missing", "symbol": "unknown", "observed_at": now},
+    ]
+
+    assert [
+        row["symbol"]
+        for row in _fresh_live_rows(
+            rows,
+            statuses,
+            now=now,
+            max_age_seconds=120,
+        )
+    ] == ["fresh", "partial-but-fresh"]
+    assert [
+        row["symbol"] for row in _rows_from_usable_venues(rows, statuses)
+    ] == ["fresh", "partial-but-fresh", "stale", "cached-upstream"]
+
+
+def test_service_discovers_spot_securities_by_exact_contract_identity(tmp_path) -> None:
+    store = CarryStore(tmp_path / "carry.duckdb")
+    now = datetime.now(timezone.utc)
+    store.upsert_instruments(
+        [
+            Instrument(
+                venue="xyz",
+                symbol="xyz:MINIMAX",
+                underlying="MINIMAX",
+                metadata={"asset_class": "stock", "spot_carry_eligible": True},
+            ),
+            Instrument(
+                venue="xyz",
+                symbol="xyz:SPCX",
+                underlying="SPACEX",
+                metadata={"asset_class": "preipo", "spot_carry_eligible": False},
+            ),
+        ]
+    )
+    store.upsert_snapshots(
+        [
+            MarketSnapshot(
+                venue="xyz",
+                symbol=symbol,
+                underlying=underlying,
+                observed_at=now,
+                funding_rate=0.0001,
+                funding_interval_hours=1,
+            )
+            for symbol, underlying in (
+                ("xyz:MINIMAX", "MINIMAX"),
+                ("xyz:SPCX", "SPACEX"),
+            )
+        ]
+    )
+    service = CarryService(
+        Settings(database_path=tmp_path / "unused.duckdb", enabled_venues="xyz"),
+        store,
+        [],
+    )
+
+    try:
+        securities = service._mapped_spot_securities()
+    finally:
+        asyncio.run(service.stop())
+
+    assert [(item.security_id, item.ticker) for item in securities] == [
+        ("HK:XHKG:0100", "0100.HK")
+    ]
+
+
+def test_security_annotation_invalidates_a_failed_rotating_quote() -> None:
+    security = get_security("US:XNYS:BB")
+    assert security is not None
+    result = AdapterResult(
+        instruments=[
+            Instrument(
+                venue="us_equity",
+                symbol="BB",
+                underlying="BB",
+                product_type="stock",
+                metadata={"quote_valid": True},
+            )
+        ]
+    )
+
+    CarryService._attach_security_identity(result, [security])
+
+    assert result.instruments[0].metadata["security_id"] == "US:XNYS:BB"
+    assert result.instruments[0].metadata["quote_valid"] is False
 
 
 @pytest.mark.asyncio

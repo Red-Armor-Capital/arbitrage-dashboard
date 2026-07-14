@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEX_VENUES,
+  matchesCarrySelection,
   matchesDexSelection,
   parseDexPreference,
   requiredDexVenues,
@@ -73,4 +74,69 @@ test("stored preferences ignore unknown venues and serialize canonically", () =>
     "hotstuff",
     "orderly",
   ]);
+});
+
+test("blank settled APR minimum does not filter current negative carry", () => {
+  const historicalCandidate = {
+    current_carry_apr: -12,
+    mean_carry_apr: 48,
+  };
+
+  assert.equal(matchesCarrySelection(historicalCandidate, "", false), true);
+  assert.equal(matchesCarrySelection(historicalCandidate, "  ", false), true);
+  assert.equal(matchesCarrySelection(historicalCandidate, "0", false), true);
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: -12, mean_carry_apr: null },
+      "",
+      false,
+    ),
+    true,
+  );
+});
+
+test("settled APR minimum uses history only and rejects missing history", () => {
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: 80, mean_carry_apr: null },
+      "10",
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: -5, mean_carry_apr: 12 },
+      "10",
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: 80, mean_carry_apr: 8 },
+      "10",
+      false,
+    ),
+    false,
+  );
+});
+
+test("current positive carry is an independent optional filter", () => {
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: -1, mean_carry_apr: 50 },
+      "",
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesCarrySelection(
+      { current_carry_apr: 1, mean_carry_apr: 50 },
+      "",
+      true,
+    ),
+    true,
+  );
 });

@@ -141,7 +141,11 @@ class CarryOpportunity(BaseModel):
     asset_class: Literal["stock", "etf", "index", "preipo", "basket", "unknown"]
     strategy_type: Literal["perp_perp", "spot_perp"]
     price_assumption: Literal[
-        "observed", "spot_equals_perp", "us_spot_quote", "kr_spot_quote"
+        "observed",
+        "spot_equals_perp",
+        "spot_quote",
+        "us_spot_quote",
+        "kr_spot_quote",
     ]
     fee_scope: Literal["both_legs", "perp_leg_only"]
     long_venue: str
@@ -163,11 +167,14 @@ class CarryOpportunity(BaseModel):
     long_liquidity: PerpLiquiditySnapshot | None = None
     short_liquidity: PerpLiquiditySnapshot
     cross_basis_pct: float | None = None
-    spot_market: Literal["US", "KR"] | None = None
+    spot_market: Literal["US", "KR", "HK", "JP", "TW"] | None = None
+    spot_security_id: str | None = None
+    spot_mic: str | None = None
     spot_symbol: str | None = None
     spot_price_local: float | None = None
     spot_currency: str | None = None
     spot_local_per_usd: float | None = None
+    spot_fx_symbol: str | None = None
     spot_price_usd: float | None = None
     spot_equivalent_price_usd: float | None = None
     spot_units_per_perp_unit: float | None = None

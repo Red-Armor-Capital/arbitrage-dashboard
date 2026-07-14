@@ -17,6 +17,7 @@ from backend.app.asset_registry import (
         ("SMSN", "SAMSUNG"),
         ("SAMSUNGUSD", "SAMSUNG"),
         ("HYUNDAIUSD", "HYUNDAI"),
+        ("PURRDAT", "PURR"),
         ("SPCX", "SPACEX"),
         ("X", "SPACEX"),
         ("USA100", "US100"),
@@ -36,7 +37,7 @@ def test_similar_exchange_symbols_remain_distinct() -> None:
     assert resolve_asset("GOOGL").underlying == "GOOGL"
 
 
-@pytest.mark.parametrize("symbol", ["INTC", "SKHX", "SAMSUNGUSD"])
+@pytest.mark.parametrize("symbol", ["INTC", "SKHX", "SAMSUNGUSD", "CBRS"])
 def test_stocks_are_spot_carry_eligible(symbol: str) -> None:
     spec = resolve_asset(symbol)
     assert spec.asset_class == "stock"
@@ -57,7 +58,6 @@ def test_etfs_are_spot_carry_eligible(symbol: str) -> None:
         ("USA500", "index"),
         ("SPCX", "preipo"),
         ("ANTHROPIC", "preipo"),
-        ("CBRS", "preipo"),
     ],
 )
 def test_non_broker_spot_assets_are_not_spot_carry_eligible(
