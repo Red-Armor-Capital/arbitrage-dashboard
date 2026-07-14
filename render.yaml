@@ -14,9 +14,11 @@ services:
       - key: CARRY_DATABASE_PATH
         value: /tmp/carry.duckdb
       - key: CARRY_REFRESH_SECONDS
-        value: "30"
+        value: "60"
       - key: CARRY_US_EQUITY_REFRESH_SECONDS
         value: "60"
+      - key: CARRY_ENABLED_VENUES
+        value: lighter,extended,xyz,hotstuff,orderly,us_equity,kr_equity,hk_equity,jp_equity
       - key: CARRY_PREDICTION_COLLECTION_ENABLED
         value: "false"
       - key: CARRY_MANUAL_REFRESH_ENABLED

@@ -73,7 +73,7 @@ npm run dev
 
 前端使用 Cloudflare Workers，后端使用 Render Free Web Service。Render 免费实例会在无入站请求后休眠，且本地 DuckDB 在休眠、重启或重新部署后丢失，因此该方案只用于个人演示。
 
-Render 注册并连接 GitHub 后，从仓库根目录的 `render.yaml` 创建 Blueprint。首次创建时填写 Cloudflare 前端的完整 Origin。后端固定使用单进程，普通实时行情保持开启，分钟预测归档采集器保持关闭。
+Render 注册并连接 GitHub 后，从仓库根目录的 `render.yaml` 创建 Blueprint。首次创建时填写 Cloudflare 前端的完整 Origin。后端固定使用单进程，仅刷新股票/ETF 相关 DEX 与对应现货市场，普通实时行情保持开启，分钟预测归档采集器保持关闭。
 
 Render 后端可用后，在本地 `.env.production` 设置：
 
