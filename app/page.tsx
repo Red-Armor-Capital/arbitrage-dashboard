@@ -117,6 +117,8 @@ const sortLabels: Record<OpportunitySortKey, string> = {
 
 const API_BASE =
   process.env.NEXT_PUBLIC_CARRY_API_URL ?? "http://localhost:8000";
+const MANUAL_REFRESH_ENABLED =
+  process.env.NEXT_PUBLIC_CARRY_MANUAL_REFRESH_ENABLED === "true";
 const DEX_PREFERENCE_STORAGE_KEY = "equity-carry:selected-dex:v1";
 
 const venueNames: Record<string, string> = {
@@ -404,8 +406,12 @@ export default function Home() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE}/api/refresh`, { method: "POST" });
-      if (!response.ok) throw new Error(`API ${response.status}`);
+      if (MANUAL_REFRESH_ENABLED) {
+        const response = await fetch(`${API_BASE}/api/refresh`, {
+          method: "POST",
+        });
+        if (!response.ok) throw new Error(`API ${response.status}`);
+      }
       await loadDashboard();
     } catch (requestError) {
       setError(

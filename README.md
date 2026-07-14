@@ -67,6 +67,28 @@ npm run dev
 - `CARRY_PREDICTION_HOT_DAYS`：DuckDB 至少保留的分钟数据天数，默认 90。
 - `CARRY_PREDICTION_ARCHIVE_DIR`：永久月度 Parquet 归档目录。
 - `CARRY_PREDICTION_STATUS_WINDOW_MINUTES`：采集覆盖率状态窗口，默认 60 分钟。
+- `CARRY_MANUAL_REFRESH_ENABLED`：是否开放会立即扇出请求到所有行情源的 `POST /api/refresh`；默认关闭。关闭时前端刷新按钮只重新读取当前看板。
+
+## 个人演示部署
+
+前端使用 Cloudflare Workers，后端使用 Render Free Web Service。Render 免费实例会在无入站请求后休眠，且本地 DuckDB 在休眠、重启或重新部署后丢失，因此该方案只用于个人演示。
+
+Render 注册并连接 GitHub 后，从仓库根目录的 `render.yaml` 创建 Blueprint。首次创建时填写 Cloudflare 前端的完整 Origin。后端固定使用单进程，普通实时行情保持开启，分钟预测归档采集器保持关闭。
+
+Render 后端可用后，在本地 `.env.production` 设置：
+
+```dotenv
+NEXT_PUBLIC_CARRY_API_URL=https://red-armor-equity-carry-api.onrender.com
+NEXT_PUBLIC_CARRY_MANUAL_REFRESH_ENABLED=false
+```
+
+然后部署前端：
+
+```bash
+npm run deploy
+```
+
+Cloudflare 构建和部署要求 Node.js 22.13+。生产后端应将 `CARRY_FRONTEND_ORIGINS` 设为实际 Cloudflare Origin，并保持 `CARRY_FRONTEND_ORIGIN_REGEX` 为空。
 
 公开 API 会受到所在地区网络策略影响。单个平台暂时离线时，后端会保留已有历史并继续刷新其他平台；状态不会伪装成健康。
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -32,7 +32,11 @@ app.add_middleware(
     allow_origins=settings.origins,
     allow_origin_regex=settings.origin_regex,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=(
+        ["GET", "POST", "OPTIONS"]
+        if settings.manual_refresh_enabled
+        else ["GET", "OPTIONS"]
+    ),
     allow_headers=["*"],
 )
 
@@ -59,5 +63,7 @@ async def prediction_collector_status():
 
 @app.post("/api/refresh")
 async def refresh():
+    if not settings.manual_refresh_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
     await service.refresh_once()
     return {"status": "ok"}

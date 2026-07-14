@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     prediction_hot_days: int = 90
     prediction_archive_dir: Path = ROOT_DIR / "data" / "prediction_archive"
     prediction_status_window_minutes: int = 60
+    manual_refresh_enabled: bool = False
     frontend_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     frontend_origin_regex: str = (
         r"^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?$"
