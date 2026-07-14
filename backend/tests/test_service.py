@@ -121,6 +121,10 @@ class ConcurrencyAdapter(PerSymbolAdapter):
             self.active_history_requests -= 1
 
 
+class HighConcurrencyAdapter(ConcurrencyAdapter):
+    history_concurrency = 8
+
+
 @pytest.mark.asyncio
 async def test_service_caps_history_concurrency_per_adapter_instance(tmp_path) -> None:
     service = CarryService(
@@ -130,12 +134,20 @@ async def test_service_caps_history_concurrency_per_adapter_instance(tmp_path) -
             history_symbol_concurrency=2,
         ),
         CarryStore(tmp_path / "store.duckdb"),
-        [PerSymbolAdapter],
+        [HighConcurrencyAdapter],
     )
 
     try:
-        assert service.adapters[0].history_concurrency == 2
-        assert PerSymbolAdapter.history_concurrency == 8
+        adapter = service.adapters[0]
+        adapter.symbols = ["A", "B", "C", "D"]
+        instruments = [adapter._instrument(symbol) for symbol in adapter.symbols]
+        await adapter.collect_history(
+            instruments,
+            datetime.now(timezone.utc) - timedelta(days=7),
+        )
+
+        assert adapter.max_active_history_requests == 2
+        assert HighConcurrencyAdapter.history_concurrency == 8
     finally:
         await service.stop()
 
