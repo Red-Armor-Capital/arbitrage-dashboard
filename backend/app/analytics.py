@@ -5,8 +5,13 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from .models import CarryOpportunity
-from .us_equity import US_EQUITY_VENUE, get_us_spot_spec
+from .models import CarryOpportunity, PerpLiquiditySnapshot
+from .security_registry import (
+    ContractSpotLink,
+    SecuritySpec,
+    get_security,
+    resolve_contract_spot,
+)
 
 
 HOURS_PER_YEAR = 24 * 365
@@ -87,6 +92,57 @@ def _asset_class(row: dict) -> str:
     return value if value in ASSET_CLASSES else "unknown"
 
 
+def _nonnegative_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _perp_liquidity(row: dict) -> PerpLiquiditySnapshot:
+    price = _nonnegative_float(row.get("mark_price") or row.get("index_price"))
+    open_interest = _nonnegative_float(row.get("open_interest"))
+    open_interest_usd = (
+        open_interest * price
+        if open_interest is not None and price is not None and price > 0
+        else None
+    )
+    return PerpLiquiditySnapshot(
+        venue=str(row["venue"]),
+        symbol=str(row["symbol"]),
+        volume_24h_usd=_nonnegative_float(row.get("volume_24h")),
+        open_interest_usd=open_interest_usd,
+    )
+
+
+def _contract_security(row: dict) -> tuple[ContractSpotLink | None, SecuritySpec | None]:
+    link = resolve_contract_spot(str(row.get("venue") or ""), str(row.get("symbol") or ""))
+    return link, get_security(link.security_id) if link is not None else None
+
+
+def _carry_group_key(row: dict) -> tuple[str, ...]:
+    """Keep exact listed securities distinct across every strategy type."""
+
+    link, _security = _contract_security(row)
+    if link is not None:
+        return ("security", link.security_id)
+    if (
+        str(row.get("venue") or "") in CHAIN_PERP_VENUES
+        and _asset_class(row) in {"stock", "etf"}
+    ):
+        # A stock-like DEX contract without a reviewed link cannot be paired by
+        # company name: it may be an ADR, a local share, or a different class.
+        return (
+            "unmapped",
+            str(row.get("venue") or ""),
+            str(row.get("symbol") or ""),
+        )
+    return ("underlying", str(row.get("underlying") or ""))
+
+
 def build_carry_opportunities(
     current_rows: list[dict],
     settled_rows: list[dict],
@@ -96,7 +152,7 @@ def build_carry_opportunities(
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=lookback_days)
     histories = _history_by_instrument(settled_rows)
-    by_underlying: dict[str, list[dict]] = defaultdict(list)
+    grouped_rows: dict[tuple[str, ...], list[dict]] = defaultdict(list)
     for row in current_rows:
         interval = float(row["funding_interval_hours"] or 0)
         rate = row["funding_rate"]
@@ -104,30 +160,46 @@ def build_carry_opportunities(
             continue
         row = dict(row)
         row["hourly_rate"] = float(rate) / interval
-        by_underlying[row["underlying"]].append(row)
+        grouped_rows[_carry_group_key(row)].append(row)
 
-    spots_by_symbol = {
-        str(row["symbol"]).upper(): row
+    spots_by_security_id = {
+        str(row["security_id"]): row
         for row in (spot_rows or [])
-        if row.get("venue") == US_EQUITY_VENUE
+        if row.get("security_id") and row.get("quote_valid") is True
     }
 
     opportunities: list[CarryOpportunity] = []
-    for underlying, rows in by_underlying.items():
-        # Spot/perp carry uses a real US-listed quote and an explicit contract
-        # unit mapping. Only positive-funding perps produce long-spot/short-perp.
+    for _group_key, rows in grouped_rows.items():
+        _mapped_link, mapped_security = _contract_security(rows[0])
+        underlying = (
+            mapped_security.underlying
+            if mapped_security is not None
+            else str(rows[0].get("underlying") or "")
+        )
+        # Spot/perp carry requires a reviewed exact contract/security link. A
+        # matching company name, ticker fragment, ADR, or other listing never
+        # acts as a fallback.
         for short_row in rows:
             current_hourly = short_row["hourly_rate"]
-            asset_class = _asset_class(short_row)
-            spot_spec = get_us_spot_spec(underlying)
-            spot_row = spots_by_symbol.get(spot_spec.ticker) if spot_spec else None
+            spot_link, spot_spec = _contract_security(short_row)
+            asset_class = spot_spec.asset_class if spot_spec else _asset_class(short_row)
+            spot_row = (
+                spots_by_security_id.get(spot_link.security_id)
+                if spot_link is not None
+                else None
+            )
             if (
                 short_row["venue"] not in CHAIN_PERP_VENUES
-                or current_hourly <= 0
                 or short_row.get("spot_carry_eligible") is not True
+                or short_row.get("force_reduce_only") is True
                 or asset_class not in {"stock", "etf"}
+                or spot_link is None
                 or spot_spec is None
                 or spot_row is None
+                or spot_link.comparison_kind == "local_currency"
+                or str(spot_row.get("venue") or "") != spot_spec.spot_venue
+                or str(spot_row.get("symbol") or "").upper()
+                != spot_spec.ticker.upper()
             ):
                 continue
 
@@ -143,10 +215,10 @@ def build_carry_opportunities(
             else:
                 continue
             spot_price = float(spot_price_value)
-            spot_equivalent = spot_price * spot_spec.spot_units_per_perp_unit
+            spot_equivalent = spot_price * spot_link.spot_units_per_perp_unit
             if spot_equivalent <= 0:
                 continue
-            # Contract-relative-to-US-spot basis. Positive means the contract is
+            # Contract-relative-to-exact-spot basis. Positive means the contract is
             # at a premium; negative means it is at a discount.
             spot_perp_basis = (perp_price / spot_equivalent - 1) * 100
 
@@ -161,29 +233,37 @@ def build_carry_opportunities(
             # broker execution leg. Spot-side costs remain out of scope.
             round_trip_fee = 2 * float(short_row["taker_fee"] or 0)
 
-            spot_observed_at = spot_row["observed_at"]
-            perp_observed_at = short_row["observed_at"]
+            spot_observed_at = (
+                spot_row.get("source_observed_at") or spot_row["observed_at"]
+            )
+            perp_observed_at = (
+                short_row.get("source_observed_at") or short_row["observed_at"]
+            )
             oldest = min(spot_observed_at, perp_observed_at)
-            comparison_note = None
-            if underlying == "SKHYNIX":
-                comparison_note = (
-                    "10 SKHY ADS = 1 SK Hynix common share; "
-                    + (
-                        "Lighter is a KRW-performance quanto reference"
-                        if short_row["venue"] == "lighter"
-                        else "contract unit compared with one common share"
-                    )
+            comparison_parts = [
+                spot_link.comparison_note
+                or f"{spot_spec.display_name} ({spot_spec.ticker})",
+                (
+                    f"1 contract unit = {spot_link.spot_units_per_perp_unit:g} "
+                    "listed spot unit"
+                ),
+            ]
+            if spot_spec.local_currency != "USD":
+                comparison_parts.append(
+                    f"{spot_spec.local_currency} spot converted with "
+                    f"USD/{spot_spec.local_currency}; public FX is a reference"
                 )
+            comparison_note = "; ".join(comparison_parts)
 
             opportunities.append(
                 CarryOpportunity(
                     underlying=underlying,
-                    display_name=short_row.get("display_name"),
+                    display_name=spot_spec.display_name,
                     asset_class=asset_class,
                     strategy_type="spot_perp",
-                    price_assumption="us_spot_quote",
+                    price_assumption="spot_quote",
                     fee_scope="perp_leg_only",
-                    long_venue=US_EQUITY_VENUE,
+                    long_venue=spot_spec.spot_venue,
                     long_symbol=spot_spec.ticker,
                     short_venue=short_row["venue"],
                     short_symbol=short_row["symbol"],
@@ -200,10 +280,22 @@ def build_carry_opportunities(
                     history_quality=history_quality,
                     long_funding_apr=0.0,
                     short_funding_apr=current_hourly * HOURS_PER_YEAR * 100,
+                    short_liquidity=_perp_liquidity(short_row),
+                    spot_market=spot_spec.market,
+                    spot_security_id=spot_spec.security_id,
+                    spot_mic=spot_spec.mic,
                     spot_symbol=spot_spec.ticker,
+                    spot_price_local=_nonnegative_float(
+                        spot_row.get("local_price")
+                    ),
+                    spot_currency=spot_spec.local_currency,
+                    spot_local_per_usd=_nonnegative_float(
+                        spot_row.get("local_per_usd")
+                    ),
+                    spot_fx_symbol=spot_row.get("fx_symbol") or spot_spec.fx_symbol,
                     spot_price_usd=spot_price,
                     spot_equivalent_price_usd=spot_equivalent,
-                    spot_units_per_perp_unit=spot_spec.spot_units_per_perp_unit,
+                    spot_units_per_perp_unit=spot_link.spot_units_per_perp_unit,
                     perp_price_usd=perp_price,
                     perp_price_kind=perp_price_kind,
                     spot_perp_basis_pct=spot_perp_basis,
@@ -222,6 +314,11 @@ def build_carry_opportunities(
         for short_row in rows:
             for long_row in rows:
                 if short_row["venue"] == long_row["venue"]:
+                    continue
+                if (
+                    short_row.get("force_reduce_only") is True
+                    or long_row.get("force_reduce_only") is True
+                ):
                     continue
                 current_hourly = short_row["hourly_rate"] - long_row["hourly_rate"]
                 if current_hourly <= 0:
@@ -258,14 +355,26 @@ def build_carry_opportunities(
                     continue
 
                 # A pair is only as fresh as its older real leg.
-                oldest = min(short_row["observed_at"], long_row["observed_at"])
+                oldest = min(
+                    short_row.get("source_observed_at") or short_row["observed_at"],
+                    long_row.get("source_observed_at") or long_row["observed_at"],
+                )
                 freshness = _freshness_seconds(oldest, now)
 
                 opportunities.append(
                     CarryOpportunity(
                         underlying=underlying,
-                        display_name=short_row.get("display_name") or long_row.get("display_name"),
-                        asset_class=_asset_class(short_row),
+                        display_name=(
+                            mapped_security.display_name
+                            if mapped_security is not None
+                            else short_row.get("display_name")
+                            or long_row.get("display_name")
+                        ),
+                        asset_class=(
+                            mapped_security.asset_class
+                            if mapped_security is not None
+                            else _asset_class(short_row)
+                        ),
                         strategy_type="perp_perp",
                         price_assumption="observed",
                         fee_scope="both_legs",
@@ -284,6 +393,8 @@ def build_carry_opportunities(
                         history_quality=history_quality,
                         long_funding_apr=long_row["hourly_rate"] * HOURS_PER_YEAR * 100,
                         short_funding_apr=short_row["hourly_rate"] * HOURS_PER_YEAR * 100,
+                        long_liquidity=_perp_liquidity(long_row),
+                        short_liquidity=_perp_liquidity(short_row),
                         cross_basis_pct=cross_basis,
                         data_freshness_seconds=freshness,
                     )

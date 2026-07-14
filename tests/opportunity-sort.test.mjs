@@ -18,6 +18,8 @@ function opportunity(underlying, overrides = {}) {
     breakeven_hours: 24,
     indicative_breakeven_hours: 18,
     history_quality: "sufficient",
+    short_liquidity: { volume_24h_usd: 1_000_000 },
+    long_liquidity: null,
     ...overrides,
   };
 }
@@ -83,6 +85,46 @@ test("uses settled breakeven before indicative breakeven", () => {
       (row) => row.underlying,
     ),
     ["SETTLED", "INDICATIVE"],
+  );
+});
+
+test("sorts spot-perp liquidity by the perp leg's 24h notional", () => {
+  const rows = [
+    opportunity("THIN", {
+      short_liquidity: { volume_24h_usd: 10_000 },
+    }),
+    opportunity("DEEP", {
+      short_liquidity: { volume_24h_usd: 10_000_000 },
+    }),
+  ];
+
+  assert.deepEqual(
+    sortOpportunities(rows, "liquidity", "desc").map(
+      (row) => row.underlying,
+    ),
+    ["DEEP", "THIN"],
+  );
+});
+
+test("sorts perp-perp liquidity by the weaker leg", () => {
+  const rows = [
+    opportunity("BOTTLENECK", {
+      strategy_type: "perp_perp",
+      long_liquidity: { volume_24h_usd: 100_000 },
+      short_liquidity: { volume_24h_usd: 20_000_000 },
+    }),
+    opportunity("BALANCED", {
+      strategy_type: "perp_perp",
+      long_liquidity: { volume_24h_usd: 2_000_000 },
+      short_liquidity: { volume_24h_usd: 3_000_000 },
+    }),
+  ];
+
+  assert.deepEqual(
+    sortOpportunities(rows, "liquidity", "desc").map(
+      (row) => row.underlying,
+    ),
+    ["BALANCED", "BOTTLENECK"],
   );
 });
 

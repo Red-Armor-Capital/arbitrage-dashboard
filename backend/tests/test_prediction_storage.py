@@ -135,7 +135,11 @@ def test_hotstuff_hourly_migration_repairs_predictions_without_touching_settled(
         )
         conn.execute(
             """
-            INSERT INTO current_market VALUES (
+            INSERT INTO current_market (
+                venue, symbol, underlying, observed_at, bid, ask, mark_price,
+                index_price, funding_rate, funding_interval_hours,
+                next_funding_at, open_interest, volume_24h
+            ) VALUES (
                 'hotstuff', 'AAPL-PERP', 'AAPL', ?, 100, 101, 100.5, 100.4,
                 0.00005, 1, ?, 10, 1000
             )

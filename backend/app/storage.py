@@ -13,6 +13,7 @@ from .prediction import PredictionMinute
 
 PREDICTION_MIGRATION_VERSION = "20260711_01_prediction_minutes"
 HOTSTUFF_HOURLY_MIGRATION_VERSION = "20260712_02_hotstuff_ticker_hourly"
+CURRENT_MARKET_SOURCE_TIME_MIGRATION_VERSION = "20260714_01_current_market_source_time"
 PREDICTION_MINUTE_COLUMNS = (
     "venue",
     "symbol",
@@ -209,6 +210,29 @@ class CarryStore:
                 conn.execute("ROLLBACK")
                 raise
 
+        source_time_migration_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (CURRENT_MARKET_SOURCE_TIME_MIGRATION_VERSION,),
+        ).fetchone()
+        if not source_time_migration_applied:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    "ALTER TABLE current_market ADD COLUMN IF NOT EXISTS "
+                    "source_observed_at TIMESTAMPTZ"
+                )
+                conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?, ?)",
+                    (
+                        CURRENT_MARKET_SOURCE_TIME_MIGRATION_VERSION,
+                        datetime.now(timezone.utc),
+                    ),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
         hotstuff_migration_applied = conn.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?",
             (HOTSTUFF_HOURLY_MIGRATION_VERSION,),
@@ -372,6 +396,7 @@ class CarryStore:
                 item.symbol,
                 item.underlying,
                 item.observed_at,
+                item.source_observed_at or item.observed_at,
                 item.bid,
                 item.ask,
                 item.mark_price,
@@ -388,10 +413,10 @@ class CarryStore:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO current_market (
-                    venue, symbol, underlying, observed_at, bid, ask, mark_price,
-                    index_price, funding_rate, funding_interval_hours,
-                    next_funding_at, open_interest, volume_24h
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    venue, symbol, underlying, observed_at, source_observed_at,
+                    bid, ask, mark_price, index_price, funding_rate,
+                    funding_interval_hours, next_funding_at, open_interest, volume_24h
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -458,6 +483,7 @@ class CarryStore:
                 """
                 SELECT
                     m.venue, m.symbol, i.underlying, m.observed_at,
+                    m.source_observed_at,
                     m.bid, m.ask, m.mark_price, m.index_price,
                     m.funding_rate, m.funding_interval_hours,
                     m.next_funding_at, m.open_interest, m.volume_24h,
@@ -470,7 +496,8 @@ class CarryStore:
                 """
             ).fetchall()
         keys = [
-            "venue", "symbol", "underlying", "observed_at", "bid", "ask",
+            "venue", "symbol", "underlying", "observed_at", "source_observed_at",
+            "bid", "ask",
             "mark_price", "index_price", "funding_rate", "funding_interval_hours",
             "next_funding_at", "open_interest", "volume_24h", "display_name",
             "maker_fee", "taker_fee", "metadata_json",
@@ -486,6 +513,7 @@ class CarryStore:
             result["spot_carry_eligible"] = (
                 metadata.get("spot_carry_eligible") is True
             )
+            result["force_reduce_only"] = metadata.get("force_reduce_only") is True
             results.append(result)
         return results
 
@@ -495,6 +523,7 @@ class CarryStore:
                 """
                 SELECT
                     m.venue, m.symbol, i.underlying, m.observed_at,
+                    m.source_observed_at,
                     m.bid, m.ask, m.mark_price, m.index_price,
                     i.display_name, i.metadata_json
                 FROM current_market m
@@ -504,7 +533,8 @@ class CarryStore:
                 """
             ).fetchall()
         keys = [
-            "venue", "symbol", "underlying", "observed_at", "bid", "ask",
+            "venue", "symbol", "underlying", "observed_at", "source_observed_at",
+            "bid", "ask",
             "mark_price", "index_price", "display_name", "metadata_json",
         ]
         results: list[dict] = []
@@ -515,6 +545,21 @@ class CarryStore:
             result["provider_symbol"] = metadata.get("provider_symbol")
             result["quote_session"] = metadata.get("quote_session")
             result["quote_delayed"] = metadata.get("quote_delayed") is True
+            result["spot_market"] = metadata.get("spot_market")
+            result["security_id"] = metadata.get("security_id")
+            result["mic"] = metadata.get("mic")
+            result["ticker"] = metadata.get("ticker")
+            result["quote_valid"] = metadata.get("quote_valid") is True
+            result["delay_status"] = metadata.get("delay_status")
+            result["local_price"] = metadata.get("local_price")
+            result["local_currency"] = metadata.get("local_currency")
+            result["local_per_usd"] = metadata.get(
+                "local_per_usd", metadata.get("fx_rate")
+            )
+            result["fx_symbol"] = metadata.get("fx_symbol")
+            result["fx_source"] = metadata.get("fx_source")
+            result["fx_observed_at"] = metadata.get("fx_observed_at")
+            result["stock_observed_at"] = metadata.get("stock_observed_at")
             results.append(result)
         return results
 

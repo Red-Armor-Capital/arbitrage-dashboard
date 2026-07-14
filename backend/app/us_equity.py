@@ -23,7 +23,7 @@ class UsSpotSpec:
 
 
 @dataclass(frozen=True)
-class UsEquityQuote:
+class EquityQuote:
     ticker: str
     provider_symbol: str
     price: float
@@ -43,21 +43,22 @@ class UsEquityCollection:
 # that a DEX contract has an equivalent, publicly traded US spot leg.
 _ONE_TO_ONE_US_TICKERS = frozenset(
     {
-        "AAPL", "AAOI", "AMD", "AMZN", "ARM", "ASML", "AVGO", "BABA",
-        "BB", "BE", "BMNR", "COIN", "CRCL", "CRWV", "DELL", "GME",
-        "GOOGL", "HOOD", "IBM", "INTC", "IWM", "LITE", "META", "MRVL",
-        "MSFT", "MSTR", "MU", "NBIS", "NOK", "NOW", "NVDA", "ORCL",
-        "PLTR", "QCOM", "QQQ", "RKLB", "SNDK", "SOXL", "SPY", "STRC",
-        "TSLA", "TSM", "TTWO", "URA", "WDC", "WEN",
+        "AAPL", "AAOI", "AMAT", "AMD", "AMZN", "ARM", "ASML", "AVGO",
+        "BABA", "BB", "BE", "BIRD", "BMNR", "BOT", "BOTZ", "BX", "CBRS",
+        "COIN", "COST", "CRCL", "CRWV", "DELL", "DIA", "DKNG", "DRAM",
+        "EBAY", "EWJ", "EWT", "EWY", "EWZ", "GLW", "GME", "GOOG", "GOOGL",
+        "HIMS", "HOOD", "IBM", "INTC", "IWM", "KORU", "LITE", "LLY", "MAGS",
+        "META", "MRVL", "MSFT", "MSTR", "MU", "NBIS", "NFLX", "NOK",
+        "NOW", "NVDA", "ORCL", "PLTR", "PURR", "QCOM", "QNT", "QQQ",
+        "RIVN", "RKLB", "SHAZ", "SMH", "SNDK", "SOXL", "SPY", "STRC",
+        "TSLA", "TSM", "TTWO", "URA", "URNM", "USAR", "WDC", "WEN",
+        "XLE", "ZM",
     }
 )
 
 
 def get_us_spot_spec(underlying: str) -> UsSpotSpec | None:
     normalized = underlying.strip().upper()
-    if normalized == "SKHYNIX":
-        # One SKHY ADS represents 0.1 SK Hynix common share.
-        return UsSpotSpec(normalized, "SKHY", ("SKHY", "SKHYV"), 10.0)
     if normalized == "SKHY":
         return UsSpotSpec(normalized, "SKHY", ("SKHY", "SKHYV"), 1.0)
     if normalized in _ONE_TO_ONE_US_TICKERS:
@@ -76,12 +77,12 @@ def _session_for_timestamp(meta: dict[str, Any], timestamp: int) -> str:
     periods = meta.get("currentTradingPeriod") or {}
     for name in ("pre", "regular", "post"):
         period = periods.get(name) or {}
-        if int(period.get("start") or 0) <= timestamp <= int(period.get("end") or 0):
+        if int(period.get("start") or 0) <= timestamp < int(period.get("end") or 0):
             return name
     return str(meta.get("marketState") or "closed").lower()
 
 
-async def _yahoo_quote(client: httpx.AsyncClient, ticker: str) -> UsEquityQuote:
+async def fetch_yahoo_quote(client: httpx.AsyncClient, ticker: str) -> EquityQuote:
     response = await client.get(
         f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}",
         params={"interval": "1m", "range": "1d", "includePrePost": "true"},
@@ -123,14 +124,19 @@ async def _yahoo_quote(client: httpx.AsyncClient, ticker: str) -> UsEquityQuote:
     observed_at = _timestamp(observed_timestamp)
     if observed_at is None:
         raise ValueError("Yahoo returned an invalid quote timestamp")
-    return UsEquityQuote(
+    raw_delay = meta.get("exchangeDataDelayedBy")
+    try:
+        is_delayed = raw_delay is None or int(raw_delay) > 0
+    except (TypeError, ValueError):
+        is_delayed = True
+    return EquityQuote(
         ticker=ticker,
         provider_symbol=ticker,
         price=price,
         observed_at=observed_at,
         source="Yahoo chart",
         session=_session_for_timestamp(meta, observed_timestamp),
-        is_delayed=False,
+        is_delayed=is_delayed,
     )
 
 
@@ -154,7 +160,7 @@ def _parse_nasdaq_time(value: object) -> datetime | None:
     return local.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
 
 
-async def _nasdaq_quote(client: httpx.AsyncClient, ticker: str) -> UsEquityQuote:
+async def _nasdaq_quote(client: httpx.AsyncClient, ticker: str) -> EquityQuote:
     response = await client.get(
         f"https://api.nasdaq.com/api/quote/{ticker}/info",
         params={"assetclass": "stocks"},
@@ -176,7 +182,7 @@ async def _nasdaq_quote(client: httpx.AsyncClient, ticker: str) -> UsEquityQuote
     observed_at = _parse_nasdaq_time(primary.get("lastTradeTimestamp"))
     if observed_at is None:
         raise ValueError("Nasdaq returned no valid quote timestamp")
-    return UsEquityQuote(
+    return EquityQuote(
         ticker=ticker,
         provider_symbol=ticker,
         price=price,
@@ -190,14 +196,14 @@ async def _nasdaq_quote(client: httpx.AsyncClient, ticker: str) -> UsEquityQuote
 async def _quote_spec(
     client: httpx.AsyncClient,
     spec: UsSpotSpec,
-) -> tuple[UsEquityQuote | None, str | None]:
+) -> tuple[EquityQuote | None, str | None]:
     errors: list[str] = []
     for symbol in spec.quote_symbols:
-        for fetcher in (_nasdaq_quote, _yahoo_quote):
+        for fetcher in (_nasdaq_quote, fetch_yahoo_quote):
             try:
                 async with asyncio.timeout(12):
                     quote = await fetcher(client, symbol)
-                return UsEquityQuote(
+                return EquityQuote(
                     ticker=spec.ticker,
                     provider_symbol=symbol,
                     price=quote.price,
@@ -225,7 +231,7 @@ async def collect_us_equity_quotes(
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def fetch(spec: UsSpotSpec) -> tuple[UsSpotSpec, UsEquityQuote | None, str | None]:
+    async def fetch(spec: UsSpotSpec) -> tuple[UsSpotSpec, EquityQuote | None, str | None]:
         async with semaphore:
             quote, error = await _quote_spec(client, spec)
         return spec, quote, error
@@ -240,6 +246,18 @@ async def collect_us_equity_quotes(
             "provider_symbol": quote.provider_symbol if quote else spec.quote_symbols[0],
             "quote_session": quote.session if quote else "unavailable",
             "quote_delayed": quote.is_delayed if quote else True,
+            "spot_market": "US",
+            "local_price": quote.price if quote else None,
+            "local_currency": "USD",
+            "local_per_usd": 1.0,
+            "market": "US",
+            "ticker": spec.ticker,
+            "quote_valid": quote is not None,
+            "delay_status": (
+                "unavailable"
+                if quote is None
+                else "delayed" if quote.is_delayed else "realtime"
+            ),
         }
         instruments.append(
             Instrument(

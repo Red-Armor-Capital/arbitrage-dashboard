@@ -23,6 +23,7 @@ from ..models import (
     MarketSnapshot,
     utc_now,
 )
+from ..security_registry import resolve_contract_spot
 
 
 def _millis(value: object) -> datetime | None:
@@ -258,6 +259,10 @@ class LighterAdapter(VenueAdapter):
                     "funding_clamp_big": item.get("funding_clamp_big"),
                     "market_type": item.get("market_type"),
                     "strategy_index": detail.get("strategy_index"),
+                    "force_reduce_only": (
+                        (detail.get("market_config") or {}).get("force_reduce_only")
+                        is True
+                    ),
                     "status": status,
                     **asset_metadata(spec, symbol),
                 },
@@ -601,7 +606,11 @@ class XyzAdapter(VenueAdapter):
             coin = raw_name if raw_name.startswith("xyz:") else f"xyz:{raw_name}"
             if item.get("isDelisted"):
                 continue
-            if coin not in stock_coins and raw_name not in stock_coins:
+            if (
+                coin not in stock_coins
+                and raw_name not in stock_coins
+                and resolve_contract_spot(self.venue, coin) is None
+            ):
                 continue
             raw_underlying = raw_name.split(":")[-1].upper()
             if not raw_underlying:
@@ -1128,7 +1137,10 @@ class OrderlyAdapter(VenueAdapter):
                     source_tenor_hours=instrument.funding_interval_hours,
                     transform_version=_IDENTITY_TRANSFORM,
                     open_interest=self.as_float(market.get("open_interest")),
-                    volume_24h=self.as_float(market.get("24h_amount") or market.get("volume_24h")),
+                    # Orderly's 24h_amount is quote-currency notional; 24h_volume
+                    # is base-contract quantity. Keep volume_24h comparable with
+                    # Lighter daily_quote_token_volume and XYZ dayNtlVlm.
+                    volume_24h=self.as_float(market.get("24h_amount")),
                 )
             )
             if rate is not None:

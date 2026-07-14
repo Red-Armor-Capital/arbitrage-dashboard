@@ -78,6 +78,15 @@ def test_stock_quote_is_separate_from_perpetual_rows(tmp_path) -> None:
                     "provider_symbol": "BB",
                     "quote_session": "closed",
                     "quote_delayed": True,
+                    "quote_valid": True,
+                    "delay_status": "delayed",
+                    "security_id": "US:XNYS:BB",
+                    "mic": "XNYS",
+                    "ticker": "BB",
+                    "spot_market": "US",
+                    "local_price": 10.97,
+                    "local_currency": "USD",
+                    "local_per_usd": 1.0,
                 },
             )
         ]
@@ -102,6 +111,7 @@ def test_stock_quote_is_separate_from_perpetual_rows(tmp_path) -> None:
             "symbol": "BB",
             "underlying": "BB",
             "observed_at": now,
+            "source_observed_at": now,
             "bid": None,
             "ask": None,
             "mark_price": 10.97,
@@ -111,6 +121,19 @@ def test_stock_quote_is_separate_from_perpetual_rows(tmp_path) -> None:
             "provider_symbol": "BB",
             "quote_session": "closed",
             "quote_delayed": True,
+            "spot_market": "US",
+            "security_id": "US:XNYS:BB",
+            "mic": "XNYS",
+            "ticker": "BB",
+            "quote_valid": True,
+            "delay_status": "delayed",
+            "local_price": 10.97,
+            "local_currency": "USD",
+            "local_per_usd": 1.0,
+            "fx_symbol": None,
+            "fx_source": None,
+            "fx_observed_at": None,
+            "stock_observed_at": None,
         }
     ]
 
@@ -170,6 +193,7 @@ def test_instrument_sync_deactivates_only_missing_symbols(tmp_path) -> None:
             "symbol": "NVDA-USD",
             "underlying": "NVDA_CANONICAL",
             "observed_at": now,
+            "source_observed_at": now,
             "bid": None,
             "ask": None,
             "mark_price": None,
@@ -184,12 +208,36 @@ def test_instrument_sync_deactivates_only_missing_symbols(tmp_path) -> None:
             "taker_fee": 0.0,
             "asset_class": "unknown",
             "spot_carry_eligible": False,
+            "force_reduce_only": False,
         }
     ]
     settled = store.get_settled_funding(now.replace(hour=0, minute=0, second=0))
     assert [(row["symbol"], row["underlying"]) for row in settled] == [
         ("NVDA-USD", "NVDA_CANONICAL")
     ]
+
+
+def test_current_rows_preserve_upstream_source_timestamp(tmp_path) -> None:
+    store = CarryStore(tmp_path / "carry.duckdb")
+    observed_at = datetime.now(timezone.utc)
+    source_observed_at = observed_at.replace(hour=0, minute=0, second=0)
+    store.upsert_instruments(
+        [Instrument(venue="test", symbol="NVDA-USD", underlying="NVDA")]
+    )
+    store.upsert_snapshots(
+        [
+            MarketSnapshot(
+                venue="test",
+                symbol="NVDA-USD",
+                underlying="NVDA",
+                observed_at=observed_at,
+                source_observed_at=source_observed_at,
+                funding_rate=0.0001,
+            )
+        ]
+    )
+
+    assert store.get_current_rows()[0]["source_observed_at"] == source_observed_at
 
 
 def test_instrument_sync_rejects_mixed_venue_without_disabling_catalog(tmp_path) -> None:

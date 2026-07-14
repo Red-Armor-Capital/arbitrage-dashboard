@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app.analytics import HOURS_PER_YEAR, build_carry_opportunities
+from backend.app.security_registry import SECURITIES
 
 
 def _current(venue: str, symbol: str, rate: float, fee: float) -> dict:
@@ -28,11 +29,30 @@ def _current(venue: str, symbol: str, rate: float, fee: float) -> dict:
     }
 
 
-def _spot(symbol: str, price: float, observed_at: datetime | None = None) -> dict:
+def _spot(
+    symbol: str,
+    price: float,
+    observed_at: datetime | None = None,
+    *,
+    venue: str = "us_equity",
+    underlying: str | None = None,
+    market: str = "US",
+    local_price: float | None = None,
+    currency: str = "USD",
+    local_per_usd: float = 1.0,
+) -> dict:
+    security = next(
+        (
+            spec
+            for spec in SECURITIES
+            if spec.spot_venue == venue and spec.ticker.upper() == symbol.upper()
+        ),
+        None,
+    )
     return {
-        "venue": "us_equity",
+        "venue": venue,
         "symbol": symbol,
-        "underlying": symbol,
+        "underlying": underlying or symbol,
         "observed_at": observed_at or datetime.now(timezone.utc),
         "bid": None,
         "ask": None,
@@ -43,6 +63,13 @@ def _spot(symbol: str, price: float, observed_at: datetime | None = None) -> dic
         "provider_symbol": symbol,
         "quote_session": "regular",
         "quote_delayed": False,
+        "quote_valid": security is not None,
+        "spot_market": market,
+        "security_id": security.security_id if security else None,
+        "mic": security.mic if security else None,
+        "local_price": local_price if local_price is not None else price,
+        "local_currency": currency,
+        "local_per_usd": local_per_usd,
     }
 
 
@@ -90,6 +117,11 @@ def test_builds_short_high_long_low_and_breakeven() -> None:
     expected_fee = 2 * (0.00025 + 0.0001)
     assert row.round_trip_fee_pct == pytest.approx(expected_fee * 100)
     assert row.breakeven_hours == pytest.approx(expected_fee / 0.000015)
+    assert row.long_liquidity is not None
+    assert row.long_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.long_liquidity.open_interest_usd == pytest.approx(100_050)
+    assert row.short_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.short_liquidity.open_interest_usd == pytest.approx(100_050)
 
 
 def test_uses_current_rate_when_no_history_exists() -> None:
@@ -145,7 +177,7 @@ def test_builds_us_spot_chain_perp_from_single_perp_history() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.strategy_type == "spot_perp"
-    assert row.price_assumption == "us_spot_quote"
+    assert row.price_assumption == "spot_quote"
     assert row.fee_scope == "perp_leg_only"
     assert row.long_venue == "us_equity"
     assert row.long_symbol == "NVDA"
@@ -158,6 +190,10 @@ def test_builds_us_spot_chain_perp_from_single_perp_history() -> None:
     assert row.spot_equivalent_price_usd == 100
     assert row.perp_price_usd == pytest.approx(100.05)
     assert row.spot_perp_basis_pct == pytest.approx(0.05)
+    assert row.long_liquidity is None
+    assert row.short_liquidity.venue == "xyz"
+    assert row.short_liquidity.volume_24h_usd == pytest.approx(1_000_000)
+    assert row.short_liquidity.open_interest_usd == pytest.approx(100_050)
     assert row.sample_hours == 24
     assert row.history_quality == "sufficient"
     assert row.positive_ratio == 1
@@ -165,19 +201,69 @@ def test_builds_us_spot_chain_perp_from_single_perp_history() -> None:
     assert row.breakeven_hours == pytest.approx((2 * 0.00009) / 0.00002)
 
 
-@pytest.mark.parametrize(
-    ("venue", "rate"),
-    [("binance", 0.00002), ("xyz", 0.0), ("xyz", -0.00001)],
-)
-def test_does_not_build_synthetic_spot_for_cex_or_non_positive_funding(
-    venue: str,
-    rate: float,
-) -> None:
+def test_does_not_build_spot_perp_for_cex() -> None:
     rows = build_carry_opportunities(
-        [_current(venue, f"{venue}:NVDA", rate, 0.0001)], [], lookback_days=7
+        [_current("binance", "NVDA-USDT", 0.00002, 0.0001)],
+        [],
+        lookback_days=7,
+        spot_rows=[_spot("NVDA", 100.0)],
     )
 
     assert rows == []
+
+
+def test_spot_perp_keeps_negative_current_carry_when_settled_mean_is_positive() -> None:
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    current_rate = -0.00001
+    settled_rate = 0.00002
+    fee = 0.0001
+    settled = [
+        {
+            "venue": "xyz",
+            "symbol": "xyz:NVDA",
+            "underlying": "NVDA",
+            "effective_at": now - timedelta(hours=offset - 1),
+            "rate": settled_rate,
+            "interval_hours": 1.0,
+        }
+        for offset in range(1, 25)
+    ]
+
+    rows = build_carry_opportunities(
+        [_current("xyz", "xyz:NVDA", current_rate, fee)],
+        settled,
+        lookback_days=7,
+        spot_rows=[_spot("NVDA", 100.0)],
+    )
+
+    assert len(rows) == 1
+    opportunity = rows[0]
+    assert opportunity.strategy_type == "spot_perp"
+    assert opportunity.current_carry_apr == pytest.approx(
+        current_rate * HOURS_PER_YEAR * 100
+    )
+    assert opportunity.mean_carry_apr == pytest.approx(
+        settled_rate * HOURS_PER_YEAR * 100
+    )
+    assert opportunity.indicative_breakeven_hours is None
+    assert opportunity.breakeven_hours == pytest.approx((2 * fee) / settled_rate)
+
+
+def test_spot_perp_keeps_negative_current_carry_without_history() -> None:
+    rows = build_carry_opportunities(
+        [_current("xyz", "xyz:NVDA", -0.00001, 0.0001)],
+        [],
+        lookback_days=7,
+        spot_rows=[_spot("NVDA", 100.0)],
+    )
+
+    assert len(rows) == 1
+    opportunity = rows[0]
+    assert opportunity.current_carry_apr < 0
+    assert opportunity.mean_carry_apr is None
+    assert opportunity.history_quality == "unavailable"
+    assert opportunity.breakeven_hours is None
+    assert opportunity.indicative_breakeven_hours is None
 
 
 @pytest.mark.parametrize(
@@ -204,7 +290,7 @@ def test_synthetic_spot_requires_explicit_stock_or_etf_eligibility(
 
 
 def test_synthetic_spot_accepts_an_explicitly_eligible_etf() -> None:
-    row = _current("xyz", "xyz:SPY", 0.00002, 0.00009)
+    row = _current("orderly", "PERP_SPY_USDC_mythos", 0.00002, 0.00009)
     row["underlying"] = "SPY"
     row["asset_class"] = "etf"
 
@@ -216,9 +302,9 @@ def test_synthetic_spot_accepts_an_explicitly_eligible_etf() -> None:
     assert opportunities[0].asset_class == "etf"
 
 
-def test_skhynix_uses_ten_ads_and_keeps_large_real_basis() -> None:
-    row = _current("lighter", "SKHYNIXUSD", 0.00002, 0.00009)
-    row.update(
+def test_skhynix_uses_korean_common_share_and_krw_conversion() -> None:
+    korean_perp = _current("lighter", "SKHYNIXUSD", 0.00002, 0.00009)
+    korean_perp.update(
         underlying="SKHYNIX",
         display_name="SK Hynix",
         mark_price=1280.0,
@@ -226,17 +312,89 @@ def test_skhynix_uses_ten_ads_and_keeps_large_real_basis() -> None:
     )
 
     opportunities = build_carry_opportunities(
-        [row], [], lookback_days=7, spot_rows=[_spot("SKHY", 160.0)]
+        [korean_perp],
+        [],
+        lookback_days=7,
+        spot_rows=[
+            _spot(
+                "000660.KS",
+                1_919_000 / 1495.8,
+                venue="kr_equity",
+                underlying="SKHYNIX",
+                market="KR",
+                local_price=1_919_000,
+                currency="KRW",
+                local_per_usd=1495.8,
+            ),
+            _spot("SKHY", 160.0, underlying="SKHY"),
+        ],
     )
 
     assert len(opportunities) == 1
     opportunity = opportunities[0]
-    assert opportunity.spot_symbol == "SKHY"
-    assert opportunity.spot_units_per_perp_unit == 10
-    assert opportunity.spot_equivalent_price_usd == 1600
+    assert opportunity.long_venue == "kr_equity"
+    assert opportunity.spot_market == "KR"
+    assert opportunity.spot_symbol == "000660.KS"
+    assert opportunity.spot_units_per_perp_unit == 1
+    assert opportunity.spot_price_local == 1_919_000
+    assert opportunity.spot_currency == "KRW"
+    assert opportunity.spot_local_per_usd == pytest.approx(1495.8)
+    assert opportunity.spot_equivalent_price_usd == pytest.approx(1_919_000 / 1495.8)
     assert opportunity.perp_price_usd == 1280
-    assert opportunity.spot_perp_basis_pct == pytest.approx(-20)
+    assert opportunity.spot_perp_basis_pct == pytest.approx(
+        (1280 / (1_919_000 / 1495.8) - 1) * 100
+    )
     assert "quanto" in (opportunity.price_comparison_note or "")
+
+
+def test_skhynix_ads_contract_uses_us_ads_one_to_one() -> None:
+    ads_perp = _current("xyz", "xyz:SKHY", 0.00002, 0.00009)
+    ads_perp.update(
+        underlying="SKHY",
+        display_name="SK Hynix ADS",
+        mark_price=163.0,
+        index_price=162.9,
+    )
+
+    opportunities = build_carry_opportunities(
+        [ads_perp],
+        [],
+        lookback_days=7,
+        spot_rows=[
+            _spot("SKHY", 160.0, underlying="SKHY"),
+            _spot(
+                "000660.KS",
+                1280.0,
+                venue="kr_equity",
+                underlying="SKHYNIX",
+                market="KR",
+                local_price=1_900_000,
+                currency="KRW",
+                local_per_usd=1484.375,
+            ),
+        ],
+    )
+
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity.long_venue == "us_equity"
+    assert opportunity.spot_market == "US"
+    assert opportunity.spot_symbol == "SKHY"
+    assert opportunity.spot_units_per_perp_unit == 1
+    assert opportunity.spot_equivalent_price_usd == 160
+    assert opportunity.spot_perp_basis_pct == pytest.approx(1.875)
+
+
+def test_skhynix_common_share_does_not_fall_back_to_us_ads() -> None:
+    row = _current("xyz", "xyz:SKHX", 0.00002, 0.00009)
+    row.update(underlying="SKHYNIX", mark_price=1280.0, index_price=1279.0)
+
+    assert build_carry_opportunities(
+        [row],
+        [],
+        lookback_days=7,
+        spot_rows=[_spot("SKHY", 160.0, underlying="SKHY")],
+    ) == []
 
 
 def test_bb_uses_one_to_one_us_share_price() -> None:
@@ -259,3 +417,127 @@ def test_spot_perp_requires_an_observed_us_spot_quote() -> None:
     row["underlying"] = "BB"
 
     assert build_carry_opportunities([row], [], lookback_days=7) == []
+
+
+def test_liquidity_ignores_invalid_market_values() -> None:
+    row = _current("xyz", "xyz:BB", 0.00002, 0.00009)
+    row.update(
+        underlying="BB",
+        open_interest=float("nan"),
+        volume_24h=-1,
+    )
+
+    opportunities = build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[_spot("BB", 100)]
+    )
+
+    assert len(opportunities) == 1
+    assert opportunities[0].short_liquidity.open_interest_usd is None
+    assert opportunities[0].short_liquidity.volume_24h_usd is None
+
+
+@pytest.mark.parametrize(
+    ("venue", "contract_symbol", "underlying", "spot_venue", "spot_symbol", "market", "currency", "local_price", "fx"),
+    [
+        ("xyz", "xyz:MINIMAX", "MINIMAX", "hk_equity", "0100.HK", "HK", "HKD", 235.2, 7.84),
+        ("xyz", "xyz:SOFTBANK", "SOFTBANK", "jp_equity", "9984.T", "JP", "JPY", 6_574, 162.2),
+    ],
+)
+def test_local_market_contracts_use_their_exact_hk_or_jp_security(
+    venue: str,
+    contract_symbol: str,
+    underlying: str,
+    spot_venue: str,
+    spot_symbol: str,
+    market: str,
+    currency: str,
+    local_price: float,
+    fx: float,
+) -> None:
+    usd_price = local_price / fx
+    row = _current(venue, contract_symbol, 0.00002, 0.00009)
+    row.update(
+        underlying=underlying,
+        mark_price=usd_price * 1.01,
+        index_price=usd_price,
+    )
+
+    opportunities = build_carry_opportunities(
+        [row],
+        [],
+        lookback_days=7,
+        spot_rows=[
+            _spot(
+                spot_symbol,
+                usd_price,
+                venue=spot_venue,
+                underlying=underlying,
+                market=market,
+                local_price=local_price,
+                currency=currency,
+                local_per_usd=fx,
+            )
+        ],
+    )
+
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+    assert opportunity.spot_market == market
+    assert opportunity.spot_symbol == spot_symbol
+    assert opportunity.spot_mic in {"XHKG", "XTKS"}
+    assert opportunity.spot_perp_basis_pct == pytest.approx(1.0)
+
+
+def test_lighter_byd_does_not_accept_byd_company_and_reduce_only_is_not_actionable() -> None:
+    row = _current("lighter", "BYD", 0.00002, 0.00009)
+    row.update(underlying="BYD", mark_price=2.96, index_price=2.95)
+    wrong_spot = _spot(
+        "1211.HK",
+        11.0,
+        venue="hk_equity",
+        underlying="BYD",
+        market="HK",
+        local_price=86.0,
+        currency="HKD",
+        local_per_usd=7.82,
+    )
+    assert build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[wrong_spot]
+    ) == []
+
+    row["force_reduce_only"] = True
+    correct_spot = _spot(
+        "0285.HK",
+        2.96,
+        venue="hk_equity",
+        underlying="BYD",
+        market="HK",
+        local_price=23.2,
+        currency="HKD",
+        local_per_usd=7.84,
+    )
+    assert build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[correct_spot]
+    ) == []
+
+
+def test_local_common_share_and_us_ads_never_form_perp_pair_by_company_name() -> None:
+    common = _current("lighter", "SKHYNIXUSD", 0.00003, 0.00009)
+    common.update(underlying="SKHYNIX", mark_price=160, index_price=160)
+    ads = _current("xyz", "xyz:SKHY", 0.00001, 0.00009)
+    ads.update(underlying="SKHYNIX", mark_price=160, index_price=160)
+
+    assert build_carry_opportunities(
+        [common, ads], [], lookback_days=7, spot_rows=[]
+    ) == []
+
+
+def test_invalidated_spot_quote_is_not_reused() -> None:
+    row = _current("xyz", "xyz:BB", 0.00002, 0.00009)
+    row["underlying"] = "BB"
+    spot = _spot("BB", 10.0)
+    spot["quote_valid"] = False
+
+    assert build_carry_opportunities(
+        [row], [], lookback_days=7, spot_rows=[spot]
+    ) == []

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Equity Carry Monitor",
-  description: "实时比较跨平台美股永续资金费 Carry、稳定性与手续费回本时间。",
+  description: "实时比较跨平台股票/ETF 永续资金费 Carry、稳定性与手续费回本时间。",
 };
 
 export default function RootLayout({

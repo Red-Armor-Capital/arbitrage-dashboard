@@ -321,6 +321,15 @@ button {
   text-align: right;
 }
 
+.minAprField input {
+  width: 68px;
+}
+
+.minAprField input::placeholder {
+  color: var(--faint);
+  font-size: 10px;
+}
+
 .selectField select {
   width: 94px;
   color-scheme: dark;
@@ -535,6 +544,27 @@ button {
   line-height: 1.55;
 }
 
+.liquidityBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 20px;
+  color: #b8c7ef;
+  background: rgba(127, 159, 255, 0.045);
+  border-bottom: 1px solid rgba(127, 159, 255, 0.13);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.liquidityBanner strong {
+  flex: 0 0 auto;
+  color: #a8bbff;
+}
+
+.liquidityBanner span {
+  color: #8f9dc4;
+}
+
 .assumptionBanner strong {
   flex: 0 0 auto;
   color: var(--amber);
@@ -566,7 +596,7 @@ button {
 
 table {
   width: 100%;
-  min-width: 1400px;
+  min-width: 1580px;
   border-collapse: collapse;
 }
 
@@ -729,7 +759,7 @@ tbody tr:last-child td {
 }
 
 .priceBasisCell {
-  min-width: 190px;
+  min-width: 240px;
   font-family: var(--font-geist-mono), monospace;
   font-variant-numeric: tabular-nums;
 }
@@ -756,10 +786,121 @@ tbody tr:last-child td {
   font-size: 11px;
 }
 
+.priceLegIdentity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.marketTag {
+  display: inline-flex;
+  padding: 3px 5px;
+  border-radius: 5px;
+  font: 700 8px/1 var(--font-geist-mono), monospace;
+  letter-spacing: 0.04em;
+}
+
+.marketTag.us {
+  color: #b8c6ff;
+  background: rgba(127, 159, 255, 0.1);
+  border: 1px solid rgba(127, 159, 255, 0.2);
+}
+
+.marketTag.kr {
+  color: #f3d39b;
+  background: rgba(245, 187, 103, 0.1);
+  border: 1px solid rgba(245, 187, 103, 0.2);
+}
+
+.marketTag.hk {
+  color: #9ee8d9;
+  background: rgba(82, 226, 164, 0.09);
+  border: 1px solid rgba(82, 226, 164, 0.19);
+}
+
+.marketTag.jp {
+  color: #edb8b5;
+  background: rgba(255, 127, 120, 0.08);
+  border: 1px solid rgba(255, 127, 120, 0.18);
+}
+
+.marketTag.tw {
+  color: #cbbcff;
+  background: rgba(166, 135, 255, 0.08);
+  border: 1px solid rgba(166, 135, 255, 0.18);
+}
+
+.priceBasisStack .usdConversionLine span,
+.priceBasisStack .usdConversionLine strong {
+  color: #96a99f;
+  font-size: 9px;
+}
+
 .priceBasisStack small {
   color: var(--faint);
   font-family: var(--font-geist-sans), sans-serif;
   line-height: 1.35;
+}
+
+.liquidityCell {
+  min-width: 178px;
+  font-family: var(--font-geist-mono), monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.liquidityStack {
+  display: grid;
+  gap: 6px;
+}
+
+.liquidityLeg {
+  display: grid;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(82, 226, 164, 0.42);
+}
+
+.liquidityLeg.longLiquidityLeg {
+  border-left-color: rgba(127, 159, 255, 0.52);
+}
+
+.liquidityVenue {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.liquidityMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.liquidityMetrics span,
+.liquidityMetrics b,
+.liquidityMetrics strong {
+  display: block;
+}
+
+.liquidityMetrics b {
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.liquidityMetrics strong {
+  color: #d8e7df;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.liquidityStack > small {
+  color: var(--faint);
+  font-family: var(--font-geist-sans), sans-serif;
+  font-size: 9px;
 }
 
 .basisPill {
@@ -782,7 +923,7 @@ tbody tr:last-child td {
 }
 
 .quoteMeta {
-  max-width: 205px;
+  max-width: 235px;
 }
 
 .notApplicable {
@@ -811,6 +952,16 @@ tbody tr:last-child td {
 
 .positiveValue {
   color: var(--green);
+  font-weight: 650;
+}
+
+.negativeValue {
+  color: var(--red);
+  font-weight: 650;
+}
+
+.neutralValue {
+  color: var(--muted);
   font-weight: 650;
 }
 
@@ -1021,12 +1172,25 @@ footer {
     display: block;
   }
 
+  .liquidityBanner {
+    display: block;
+  }
+
   .assumptionBanner strong,
   .assumptionBanner span {
     display: block;
   }
 
   .assumptionBanner strong {
+    margin-bottom: 5px;
+  }
+
+  .liquidityBanner strong,
+  .liquidityBanner span {
+    display: block;
+  }
+
+  .liquidityBanner strong {
     margin-bottom: 5px;
   }
 

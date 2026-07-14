@@ -3,6 +3,7 @@ export type OpportunitySortKey =
   | "current"
   | "volatility"
   | "positiveRatio"
+  | "liquidity"
   | "breakeven";
 
 export type SortDirection = "asc" | "desc";
@@ -21,7 +22,17 @@ export type SortableOpportunity = {
   breakeven_hours: number | null;
   indicative_breakeven_hours: number | null;
   history_quality: "sufficient" | "limited" | "unavailable";
+  long_liquidity?: { volume_24h_usd: number | null } | null;
+  short_liquidity?: { volume_24h_usd: number | null } | null;
 };
+
+function bottleneckVolume(item: SortableOpportunity) {
+  const shortVolume = item.short_liquidity?.volume_24h_usd ?? null;
+  if (item.strategy_type === "spot_perp") return shortVolume;
+  const longVolume = item.long_liquidity?.volume_24h_usd ?? null;
+  if (longVolume === null || shortVolume === null) return null;
+  return Math.min(longVolume, shortVolume);
+}
 
 const metricByKey: Record<
   OpportunitySortKey,
@@ -31,6 +42,7 @@ const metricByKey: Record<
   mean: (item) => item.mean_carry_apr,
   volatility: (item) => item.carry_apr_volatility,
   positiveRatio: (item) => item.positive_ratio,
+  liquidity: bottleneckVolume,
   breakeven: (item) =>
     item.breakeven_hours ?? item.indicative_breakeven_hours,
 };

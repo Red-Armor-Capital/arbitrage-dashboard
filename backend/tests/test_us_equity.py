@@ -30,15 +30,16 @@ def _yahoo_payload(price: float, timestamp: int) -> dict:
     }
 
 
-def test_us_spot_specs_are_explicit_and_keep_skhynix_ratio() -> None:
+def test_us_spot_specs_are_explicit_and_keep_skhynix_ads_separate() -> None:
     bb = get_us_spot_spec("BB")
-    skhynix = get_us_spot_spec("SKHYNIX")
+    skhy = get_us_spot_spec("SKHY")
 
     assert bb is not None and bb.ticker == "BB" and bb.spot_units_per_perp_unit == 1
-    assert skhynix is not None
-    assert skhynix.ticker == "SKHY"
-    assert skhynix.quote_symbols == ("SKHY", "SKHYV")
-    assert skhynix.spot_units_per_perp_unit == 10
+    assert skhy is not None
+    assert skhy.ticker == "SKHY"
+    assert skhy.quote_symbols == ("SKHY", "SKHYV")
+    assert skhy.spot_units_per_perp_unit == 1
+    assert get_us_spot_spec("SKHYNIX") is None
     assert get_us_spot_spec("SAMSUNG") is None
 
 
@@ -73,7 +74,7 @@ async def test_quote_collection_uses_temporary_skhynix_symbol_as_delayed_fallbac
         return httpx.Response(400, json={"data": None})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        collection = await collect_us_equity_quotes(client, {"BB", "SKHYNIX"})
+        collection = await collect_us_equity_quotes(client, {"BB", "SKHY"})
 
     assert collection.errors == ()
     snapshots = {item.symbol: item for item in collection.result.snapshots}
@@ -85,3 +86,5 @@ async def test_quote_collection_uses_temporary_skhynix_symbol_as_delayed_fallbac
     instruments = {item.symbol: item for item in collection.result.instruments}
     assert instruments["SKHY"].metadata["provider_symbol"] == "SKHYV"
     assert instruments["SKHY"].metadata["quote_delayed"] is True
+    assert instruments["SKHY"].metadata["spot_market"] == "US"
+    assert instruments["SKHY"].metadata["local_currency"] == "USD"

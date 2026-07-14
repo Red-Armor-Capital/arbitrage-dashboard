@@ -116,6 +116,8 @@ async def test_lighter_discovers_reviewed_stock_and_uses_one_bulk_details_call(
     assert snapshot.raw_rate_unit == "percent"
     assert snapshot.source_tenor_hours == 1
     assert snapshot.transform_version == "percent-to-decimal-v1"
+    assert snapshot.open_interest == pytest.approx(1200)
+    assert snapshot.volume_24h == pytest.approx(500000)
 
     details_requests = [
         request
@@ -351,6 +353,8 @@ def _xyz_handler(categories: list[list[str]]):
                             "markPx": "100.1",
                             "oraclePx": "100",
                             "funding": "0.0003",
+                            "openInterest": "1200",
+                            "dayNtlVlm": "500000",
                         },
                         {"markPx": "60000", "funding": "0.00001"},
                         {"markPx": "200", "funding": "0.00001"},
@@ -389,6 +393,8 @@ async def test_xyz_uses_stock_category_and_canonicalizes_skhx_alias(
     assert snapshot.target_source == "schedule"
     assert snapshot.raw_funding_rate == pytest.approx(0.0003)
     assert snapshot.source_tenor_hours == 1
+    assert snapshot.open_interest == pytest.approx(1200)
+    assert snapshot.volume_24h == pytest.approx(500000)
     assert result.funding[0].effective_at == snapshot.next_funding_at
 
 
@@ -401,6 +407,38 @@ async def test_xyz_fails_closed_when_stock_category_is_unavailable() -> None:
 
     assert result.instruments == []
     assert result.snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_xyz_uses_reviewed_exact_link_for_qnt_category_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backend.app.adapters.dex.utc_now", lambda: COLLECTION_TIME)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["type"] == "metaAndAssetCtxs":
+            return httpx.Response(
+                200,
+                json=[
+                    {"universe": [{"name": "QNT", "growthMode": "enabled"}]},
+                    [{"markPx": "42", "oraclePx": "42", "funding": "0.0001"}],
+                ],
+            )
+        if body["type"] == "perpCategories":
+            # The DEX documentation already describes public Nasdaq QNT while
+            # this category endpoint can temporarily retain the pre-IPO label.
+            return httpx.Response(
+                200,
+                json=[["xyz:AAPL", "stocks"], ["xyz:QNT", "preipo"]],
+            )
+        raise AssertionError(f"Unexpected request body: {body}")
+
+    result = await _collect(XyzAdapter, handler)
+
+    assert [(item.symbol, item.underlying) for item in result.instruments] == [
+        ("xyz:QNT", "QNT")
+    ]
 
 
 @pytest.mark.asyncio
@@ -640,6 +678,9 @@ async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto(
                                 "symbol": symbol,
                                 "mark_price": "100",
                                 "index_price": "100",
+                                "open_interest": "1200",
+                                "24h_volume": "5000",
+                                "24h_amount": "500000",
                             }
                             for symbol in included_symbols
                         ]
@@ -682,6 +723,8 @@ async def test_orderly_includes_native_and_reviewed_mythos_stocks_not_crypto(
     assert all(item.target_source == "api" for item in result.snapshots)
     assert all(item.raw_funding_rate == pytest.approx(0.0002) for item in result.snapshots)
     assert all(item.source_tenor_hours == 1 for item in result.snapshots)
+    assert all(item.open_interest == pytest.approx(1200) for item in result.snapshots)
+    assert all(item.volume_24h == pytest.approx(500000) for item in result.snapshots)
 
 
 @pytest.mark.asyncio
