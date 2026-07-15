@@ -70,6 +70,18 @@ def _hour_floor(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
+def _bounded_history_row_limit(
+    since: datetime,
+    until: datetime,
+    *,
+    ceiling: int,
+) -> int:
+    window_hours = math.ceil(
+        max(0.0, (until - since).total_seconds()) / 3_600
+    )
+    return min(ceiling, max(1, window_hours + 2))
+
+
 def _rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -201,6 +213,14 @@ class LighterAdapter(VenueAdapter):
     base_url = "https://mainnet.zklighter.elliot.ai"
     maker_fee = 0.0
     taker_fee = 0.0
+
+    def history_instruments(self, instruments: list[Instrument]) -> list[Instrument]:
+        return [
+            instrument
+            for instrument in instruments
+            if instrument.active
+            and instrument.metadata.get("spot_carry_eligible") is True
+        ]
 
     async def collect(self, history_since: datetime, include_history: bool = True) -> AdapterResult:
         books_response, funding_response, details_response = await asyncio.gather(
@@ -364,14 +384,19 @@ class LighterAdapter(VenueAdapter):
         return AdapterResult(instruments=instruments, snapshots=snapshots, funding=current + history)
 
     async def _history(self, instrument: Instrument, since: datetime) -> list[FundingRate]:
+        requested_at = utc_now()
         response = await self.client.get(
             f"{self.base_url}/api/v1/fundings",
             params={
                 "market_id": instrument.metadata.get("market_id"),
                 "resolution": "1h",
                 "start_timestamp": int(since.timestamp()),
-                "end_timestamp": int(utc_now().timestamp()),
-                "count_back": 750,
+                "end_timestamp": int(requested_at.timestamp()),
+                "count_back": _bounded_history_row_limit(
+                    since,
+                    requested_at,
+                    ceiling=750,
+                ),
             },
         )
         response.raise_for_status()
@@ -521,12 +546,17 @@ class ExtendedAdapter(VenueAdapter):
         return AdapterResult(instruments=instruments, snapshots=snapshots, funding=current + history)
 
     async def _history(self, instrument: Instrument, since: datetime) -> list[FundingRate]:
+        requested_at = utc_now()
         response = await self.client.get(
             f"{self.base_url}/api/v1/info/{instrument.symbol}/funding",
             params={
                 "startTime": int(since.timestamp() * 1000),
-                "endTime": int(utc_now().timestamp() * 1000),
-                "limit": 10_000,
+                "endTime": int(requested_at.timestamp() * 1000),
+                "limit": _bounded_history_row_limit(
+                    since,
+                    requested_at,
+                    ceiling=10_000,
+                ),
             },
         )
         response.raise_for_status()

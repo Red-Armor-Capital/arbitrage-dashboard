@@ -13,6 +13,7 @@ from backend.app.adapters.dex import (
     LighterAdapter,
     OrderlyAdapter,
     XyzAdapter,
+    _bounded_history_row_limit,
     _seconds,
 )
 from backend.app.models import Instrument
@@ -30,6 +31,44 @@ def test_seconds_parses_epoch_and_rejects_invalid_values() -> None:
 
 def test_hotstuff_history_request_scope_is_venue_wide() -> None:
     assert HotstuffAdapter.history_request_scope == "venue"
+
+
+def test_history_row_limit_matches_window_with_small_guard() -> None:
+    until = datetime(2026, 7, 15, tzinfo=timezone.utc)
+
+    assert _bounded_history_row_limit(
+        until - timedelta(days=7),
+        until,
+        ceiling=750,
+    ) == 170
+    assert _bounded_history_row_limit(
+        until - timedelta(days=90),
+        until,
+        ceiling=750,
+    ) == 750
+    assert _bounded_history_row_limit(
+        until + timedelta(hours=1),
+        until,
+        ceiling=750,
+    ) == 2
+
+
+def test_lighter_history_excludes_contracts_without_tradeable_spot() -> None:
+    adapter = LighterAdapter(None, set())  # type: ignore[arg-type]
+    eligible = Instrument(
+        venue="lighter",
+        symbol="AAPL",
+        underlying="AAPL",
+        metadata={"spot_carry_eligible": True},
+    )
+    preipo = Instrument(
+        venue="lighter",
+        symbol="SPACEX",
+        underlying="SPACEX",
+        metadata={"spot_carry_eligible": False},
+    )
+
+    assert adapter.history_instruments([eligible, preipo]) == [eligible]
 
 
 async def _collect(
